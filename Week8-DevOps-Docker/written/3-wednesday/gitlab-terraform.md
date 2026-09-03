@@ -1,166 +1,493 @@
-# Using Terraform with GitLab CI: Infrastructure as Code (IaC) Pipelines
+# GitLab CI/CD with Terraform
 
 ## Learning Objectives
-- Automate Terraform execution stages (Init, Plan, Apply, Destroy) inside a GitLab CI pipeline.
-- Configure GitLab-Managed Terraform State storage.
-- Pass Terraform plan outputs as Merge Request artifacts for review.
-- Set up secure, manual approval gates before running infrastructure changes.
+
+By the end of this lesson, you will be able to:
+
+- Explain infrastructure-as-code (IaC) and why it belongs in a CI/CD pipeline
+- Describe the `terraform init`, `plan`, and `apply` workflow
+- Use the GitLab-managed Terraform HTTP backend to store state remotely
+- Write GitLab CI/CD jobs for each Terraform lifecycle phase
+- Publish a Terraform plan as a Merge Request artifact for review
+- Implement a safe destroy workflow in the pipeline
 
 ---
 
 ## Why This Matters
-**Infrastructure as Code (IaC)** tools like Terraform allow you to define cloud resources (like EC2 instances, RDS databases, or VPC subnets) in declarative configuration files. However, running Terraform commands manually from a developer workstation is risky:
-- The state file (which tracks the active cloud setup) can become corrupted if multiple developers run updates simultaneously.
-- Access keys must be distributed locally, increasing the risk of credential leaks.
-- Outages can occur if changes are applied without team review.
 
-By running Terraform within a GitLab CI pipeline, you solve these problems. GitLab manages state locking, runs compliance scans, and posts execution plan summaries directly onto Merge Requests for review before updates are applied.
+Provisioning infrastructure by hand — clicking through a cloud console or running commands locally — is error-prone, unrepeatable, and impossible to audit. Terraform lets you define infrastructure in code, and GitLab CI/CD automates the process of validating, reviewing, and applying that code safely. When infrastructure changes go through the same review process as application code (merge request → pipeline → approval → merge → auto-apply), your infrastructure becomes as reliable and auditable as your software. This is the foundation of modern DevOps.
 
 ---
 
-## The Concept
+## Infrastructure-as-Code (IaC) in 60 Seconds
 
-### 1. The Terraform Pipeline Workflow
-A standard IaC deployment pipeline consists of three core phases:
-1.  **Initialize (`terraform init`)**: Downloads provider plugins (like the AWS provider) and configures backend state storage.
-2.  **Plan (`terraform plan`)**: Analyzes the configuration files, compares them to the active state, and outputs a list of changes (resources to create, modify, or destroy). This plan is exported as an artifact.
-3.  **Apply (`terraform apply`)**: Executes the changes in the cloud. In production pipelines, this step is placed behind a manual approval gate.
+**Infrastructure-as-Code** means writing declarative configuration files that describe the desired state of your infrastructure — servers, networks, databases, load balancers — and using a tool to make reality match that description.
 
----
+Terraform uses **HCL (HashiCorp Configuration Language)** files (`.tf`) to describe infrastructure. When you run Terraform, it:
 
-### 2. GitLab-Managed Terraform State Backend
-Terraform uses a **state file** (`terraform.tfstate`) to track the mappings between your configuration files and actual cloud resources.
-- GitLab provides a built-in, secure **Terraform State HTTP Backend**.
-- This backend is integrated with GitLab projects, providing automated encryption at rest, secure state locking (preventing concurrent runs from corrupting data), and version tracking out-of-the-box.
+1. Reads your `.tf` files
+2. Queries the current state of your infrastructure (from a **state file**)
+3. Computes what changes are needed to reach the desired state
+4. Applies those changes via cloud provider APIs (AWS, Azure, GCP, etc.)
+
+The **state file** (`terraform.tfstate`) is critical — it is Terraform's memory of what it has already created. If it is stored locally, two engineers running Terraform simultaneously can corrupt it. The solution is a **remote backend** — a shared, locked location for the state file.
 
 ---
 
-### 3. Integrating Plans into Merge Requests
-A best practice for IaC is to display the `terraform plan` output directly in the Merge Request.
-- Team members can review the exact infrastructure changes (e.g., verifying that a database volume is not being accidentally deleted) before merging code.
-- Once the Merge Request is approved and merged to the main branch, the pipeline executes the `apply` stage to provision the resources.
+## GitLab-Managed Terraform HTTP Backend
 
+GitLab provides a built-in **HTTP state backend** for Terraform. Instead of storing `terraform.tfstate` in S3 or locally, you store it in GitLab. This gives you:
+
+- **Centralized state** — one source of truth for every environment
+- **State locking** — prevents two pipelines from running `terraform apply` at the same time
+- **State history** — GitLab keeps a version history of your state file
+- **No additional infrastructure** — no S3 bucket or DynamoDB table needed
+
+The backend URL format is:
 ```
-       Developer creates Merge Request with TF changes
-                             |
-                             v
-           +-----------------------------------+
-           |        CI RUNS 'TF PLAN'          |
-           |  - Compares config with live state|
-           |  - Saves plan file as artifact    |
-           +-----------------t-----------------+
-                             |
-                             v
-       Merge Request updated with plan summary review
-                             |
-                             v Merged to main
-           +-----------------v-----------------+
-           |       CI WAITS FOR APPROVAL       |
-           |  - Manual gate button triggers    |
-           |    deploy on main branch          |
-           +-----------------t-----------------+
-                             | Triggered
-                             v
-           +-----------------v-----------------+
-           |        CI RUNS 'TF APPLY'         |
-           |  - Provisions actual AWS resources|
-           +-----------------------------------+
+https://gitlab.com/api/v4/projects/<PROJECT_ID>/terraform/state/<STATE_NAME>
 ```
 
----
-
-## Code Examples and Walkthroughs
-
-### 1. GitLab-Managed State Backend Configuration
-To tell Terraform to use GitLab's secure state backend, configure an empty HTTP backend block in your Terraform configuration file:
+To configure Terraform to use this backend, add the following to your Terraform project:
 
 ```hcl
-# backend.tf
+# main.tf (or backend.tf) — Terraform backend configuration
+
 terraform {
+  # Specify which Terraform version this configuration requires.
+  required_version = ">= 1.5.0"
+
+  # Use the GitLab HTTP backend to store state remotely.
+  # Variables like username and password cannot be set here directly —
+  # they must be passed via environment variables or command-line flags.
+  backend "http" {
+    # The URL points to the GitLab Terraform state API for this project.
+    # Replace PROJECT_ID with your actual GitLab project's numeric ID.
+    # STATE_NAME identifies this particular state (useful if you have multiple environments).
+    address        = "https://gitlab.com/api/v4/projects/12345678/terraform/state/production"
+    lock_address   = "https://gitlab.com/api/v4/projects/12345678/terraform/state/production/lock"
+    unlock_address = "https://gitlab.com/api/v4/projects/12345678/terraform/state/production/lock"
+    lock_method    = "POST"
+    unlock_method  = "DELETE"
+    retry_wait_min = 5
+    # Authentication is provided via TF_HTTP_USERNAME and TF_HTTP_PASSWORD
+    # environment variables set in the CI/CD job — never hardcoded here.
+  }
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
   }
+}
 
-  # An empty HTTP backend configuration block.
-  # GitLab CI/CD will inject the connection credentials at runtime automatically.
-  backend "http" {}
+provider "aws" {
+  region = var.aws_region
+}
+```
+
+In the CI pipeline, authentication to the backend uses `$CI_JOB_TOKEN` — a short-lived token automatically generated by GitLab for each job. No manual credential management is needed.
+
+---
+
+## Example Terraform Configuration
+
+Here is a simple Terraform project that creates an AWS EC2 instance. The pipeline will validate, plan, and apply this configuration.
+
+```hcl
+# variables.tf — Input variables for the Terraform configuration
+variable "aws_region" {
+  description = "AWS region to deploy resources in"
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "instance_type" {
+  description = "EC2 instance type"
+  type        = string
+  default     = "t3.micro"
+}
+
+variable "environment" {
+  description = "Deployment environment (staging, production)"
+  type        = string
+}
+```
+
+```hcl
+# main.tf — Resource definitions
+resource "aws_instance" "app_server" {
+  ami           = "ami-0c55b159cbfafe1f0"    # Amazon Linux 2 in us-east-1
+  instance_type = var.instance_type
+
+  tags = {
+    Name        = "app-server-${var.environment}"
+    Environment = var.environment
+    ManagedBy   = "Terraform"
+  }
+}
+
+output "instance_public_ip" {
+  description = "Public IP address of the EC2 instance"
+  value       = aws_instance.app_server.public_ip
 }
 ```
 
 ---
 
-### 2. Complete GitLab CI/CD Terraform Pipeline
-Below is a complete `.gitlab-ci.yml` pipeline that initializes, plans, and applies infrastructure changes securely using GitLab's managed backend:
+## Complete `.gitlab-ci.yml` for Terraform
 
 ```yaml
-# A production-ready GitLab CI configuration for Terraform
+# ===========================================================
+# .gitlab-ci.yml — Terraform Infrastructure Pipeline
+# Stages: validate → plan → apply → (manual) destroy
+# ===========================================================
+
 stages:
-  - init-plan
-  - apply
+  - validate     # Check Terraform syntax and formatting
+  - plan         # Generate and review the execution plan
+  - apply        # Apply changes to infrastructure
+  - destroy      # Tear down infrastructure (manual, protected)
 
-# Use HashiCorp's official lightweight Terraform CLI image
-image: hashicorp/terraform:1.5.0
-
-# Configure variables to map Terraform to GitLab's HTTP state API endpoint
+# ---- Global Variables ----
 variables:
-  TF_STATE_NAME: "production"
+  # The Terraform image from HashiCorp provides the terraform CLI.
+  TF_IMAGE: "hashicorp/terraform:1.7"
+
+  # These point to the GitLab HTTP backend for state storage.
+  # $CI_PROJECT_ID is predefined — the numeric ID of this GitLab project.
+  # $CI_ENVIRONMENT_NAME is set by the 'environment' keyword on each job.
+  TF_STATE_NAME: "$CI_ENVIRONMENT_NAME"
   TF_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/${TF_STATE_NAME}"
 
-# Global before_script to configure authentication credentials
-before_script:
-  - terraform --version
-  # Configure the HTTP backend credentials dynamically
-  - terraform init 
-      -backend-config="address=${TF_ADDRESS}" 
-      -backend-config="lock_address=${TF_ADDRESS}/lock" 
-      -backend-config="unlock_address=${TF_ADDRESS}/lock" 
-      -backend-config="username=gitlab-ci-token" 
-      -backend-config="password=${CI_JOB_TOKEN}" 
-      -backend-config="lock_method=POST" 
-      -backend-config="unlock_method=DELETE" 
-      -backend-config="retry_wait_min=5"
+  # Terraform backend authentication using the job token.
+  # $CI_JOB_TOKEN is auto-generated per job — no manual setup needed.
+  TF_HTTP_USERNAME: "gitlab-ci-token"
+  TF_HTTP_PASSWORD: "$CI_JOB_TOKEN"
 
-# Stage 1: Run Terraform Plan
-tf-plan:
-  stage: init-plan
+  # AWS credentials: set these as protected, masked CI/CD variables
+  # in GitLab UI under Settings > CI/CD > Variables.
+  # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are read by the AWS provider automatically.
+  # Do NOT set them here — they come from the GitLab variable store.
+
+  # Path where the plan output file will be saved (used across jobs).
+  PLAN_FILE: "tfplan.binary"
+  PLAN_JSON: "tfplan.json"
+
+  # Terraform CLI flags to reduce output verbosity in logs.
+  TF_CLI_ARGS_plan: "-no-color"
+  TF_CLI_ARGS_apply: "-no-color"
+
+# ---- Reusable Terraform Template ----
+.terraform-base:
+  image: "$TF_IMAGE"
+  tags:
+    - docker
+  before_script:
+    # Initialize Terraform with the HTTP backend.
+    # -reconfigure: always use the settings provided, ignoring any local cache.
+    # -backend-config: pass the state URL dynamically so it works for any environment.
+    - |
+      terraform init \
+        -reconfigure \
+        -backend-config="address=${TF_ADDRESS}" \
+        -backend-config="lock_address=${TF_ADDRESS}/lock" \
+        -backend-config="unlock_address=${TF_ADDRESS}/lock" \
+        -backend-config="username=${TF_HTTP_USERNAME}" \
+        -backend-config="password=${TF_HTTP_PASSWORD}" \
+        -backend-config="lock_method=POST" \
+        -backend-config="unlock_method=DELETE"
+    - echo "Terraform initialized. Backend: $TF_ADDRESS"
+
+# ===========================================================
+# STAGE 1: VALIDATE
+# Check syntax, formatting, and module validity.
+# Fails fast before any plan or apply is attempted.
+# ===========================================================
+
+fmt-check:
+  extends: .terraform-base
+  stage: validate
   script:
-    # Run plan and export the plan binary artifact
-    - terraform plan -out=tfplan
+    # terraform fmt -check exits non-zero if any files need formatting.
+    # This enforces consistent code style across the team.
+    - terraform fmt -check -recursive
+    - echo "All Terraform files are properly formatted."
+  rules:
+    # Run on all branch pipelines and MRs — formatting is always required.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+validate:
+  extends: .terraform-base
+  stage: validate
+  script:
+    # terraform validate checks that all configuration is syntactically valid
+    # and internally consistent (references resolve, required variables are declared, etc.)
+    - terraform validate
+    - echo "Terraform configuration is valid."
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+# ===========================================================
+# STAGE 2: PLAN
+# Generate an execution plan showing what Terraform will change.
+# Save the plan to a file and publish it for review.
+# ===========================================================
+
+plan-staging:
+  extends: .terraform-base
+  stage: plan
+  variables:
+    TF_STATE_NAME: "staging"
+    TF_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/staging"
+  script:
+    # -var sets input variable values at runtime.
+    # In a real project, use a .tfvars file or variable files per environment.
+    - |
+      terraform plan \
+        -var="environment=staging" \
+        -var="instance_type=t3.micro" \
+        -out="$PLAN_FILE"
+    # Also export the plan as JSON for GitLab's MR report feature.
+    - terraform show -json "$PLAN_FILE" > "$PLAN_JSON"
+    - echo "Plan generated. Review the plan output above before applying."
   artifacts:
-    name: "terraform-plan"
+    # Save both the binary plan (for apply) and JSON plan (for GitLab MR report).
     paths:
-      - tfplan
-    expire_in: 2 days
+      - $PLAN_FILE            # Binary plan: consumed by the apply job
+      - $PLAN_JSON            # JSON plan: displayed in GitLab MR as a report
+    reports:
+      # GitLab reads this JSON and shows a summary of infrastructure changes
+      # directly in the Merge Request — reviewers see what will be added/changed/destroyed
+      # without leaving GitLab.
+      terraform: $PLAN_JSON
+    # Expire after a short time — plans should be applied promptly or regenerated.
+    expire_in: 1 hour
+  environment:
+    name: staging
+  rules:
+    # Run the plan for every MR (so reviewers can see proposed changes).
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    # Also run on main branch pushes (before auto-apply).
+    - if: '$CI_COMMIT_BRANCH == "main"'
 
-# Stage 2: Run Terraform Apply (Manual Gate)
-tf-apply:
-  stage: apply
+plan-production:
+  extends: .terraform-base
+  stage: plan
+  variables:
+    TF_STATE_NAME: "production"
+    TF_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/production"
   script:
-    # Apply the plan artifact generated in the previous stage
-    - terraform apply -auto-approve tfplan
-  dependencies:
-    - tf-plan
-  # Restrict apply to the main branch
-  only:
-    - main
-  # Force human confirmation before provisioning
+    - |
+      terraform plan \
+        -var="environment=production" \
+        -var="instance_type=t3.medium" \
+        -out="$PLAN_FILE"
+    - terraform show -json "$PLAN_FILE" > "$PLAN_JSON"
+  artifacts:
+    paths:
+      - $PLAN_FILE
+      - $PLAN_JSON
+    reports:
+      terraform: $PLAN_JSON
+    expire_in: 1 hour
+  environment:
+    name: production
+  rules:
+    # Only plan for production on the main branch — not on feature branches.
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ===========================================================
+# STAGE 3: APPLY
+# Apply the saved plan to actually create/modify infrastructure.
+# ===========================================================
+
+apply-staging:
+  extends: .terraform-base
+  stage: apply
+  variables:
+    TF_STATE_NAME: "staging"
+    TF_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/staging"
+  needs:
+    # Only apply the plan that was generated in this pipeline.
+    # Consuming the saved plan file ensures we apply exactly what was reviewed.
+    - job: plan-staging
+      artifacts: true          # Download the $PLAN_FILE from plan-staging
+  script:
+    # Apply the saved plan. Using a saved plan file means no prompts and no drift
+    # between what was reviewed and what gets applied.
+    - terraform apply "$PLAN_FILE"
+    - echo "Staging infrastructure updated successfully."
+    # Output the public IP for reference in the pipeline log.
+    - terraform output
+  environment:
+    name: staging
+    url: https://staging.example.com
+  rules:
+    # Auto-apply to staging when merging to main.
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
+
+apply-production:
+  extends: .terraform-base
+  stage: apply
+  variables:
+    TF_STATE_NAME: "production"
+    TF_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/production"
+  needs:
+    - job: plan-production
+      artifacts: true
+    - job: apply-staging       # Production apply requires staging to have succeeded first
+  script:
+    - terraform apply "$PLAN_FILE"
+    - echo "Production infrastructure updated successfully."
+    - terraform output
+  environment:
+    name: production
+    url: https://example.com
+  # ALWAYS require a human to approve production infrastructure changes.
   when: manual
+  allow_failure: false         # Pipeline stays blocked until a human clicks Run
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ===========================================================
+# STAGE 4: DESTROY
+# Tear down infrastructure. Strictly manual and protected.
+# ===========================================================
+
+destroy-staging:
+  extends: .terraform-base
+  stage: destroy
+  variables:
+    TF_STATE_NAME: "staging"
+    TF_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/staging"
+  script:
+    - echo "WARNING: This will DESTROY all staging infrastructure!"
+    # -auto-approve skips the interactive confirmation prompt.
+    # Safe here because this job itself is manual — a human already clicked Run.
+    - |
+      terraform destroy \
+        -var="environment=staging" \
+        -var="instance_type=t3.micro" \
+        -auto-approve
+    - echo "Staging infrastructure destroyed."
+  environment:
+    name: staging
+    action: stop               # Mark the environment as stopped in GitLab UI
+  # This job must NEVER run automatically. A human must explicitly trigger it.
+  when: manual
+  allow_failure: true          # Allow the pipeline to pass even if destroy is not triggered
+  rules:
+    # Only allow destroy from main branch (protected branch = protected variable access).
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+destroy-production:
+  extends: .terraform-base
+  stage: destroy
+  variables:
+    TF_STATE_NAME: "production"
+    TF_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/production"
+  script:
+    - echo "CRITICAL WARNING: This will DESTROY all production infrastructure!"
+    - |
+      terraform destroy \
+        -var="environment=production" \
+        -var="instance_type=t3.medium" \
+        -auto-approve
+    - echo "Production infrastructure destroyed."
+  environment:
+    name: production
+    action: stop
+  when: manual
+  allow_failure: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
 ```
 
 ---
 
-## Summary
-- **Infrastructure as Code (IaC)** pipelines automate cloud provisioning safely within the CI/CD pipeline.
-- The standard workflow runs **`init`** $\rightarrow$ **`plan`** $\rightarrow$ **`apply`**, passing the plan artifact between jobs.
-- **GitLab-Managed State Backend** secures the Terraform state file, providing S3-like locking and version tracking out-of-the-box.
-- **Manual approval gates** prevent untracked infrastructure changes from deploying to production without team review.
+## How the Plan Appears in a Merge Request
+
+When `plan-staging` runs during an MR pipeline, GitLab reads the `$PLAN_JSON` artifact and displays an infrastructure change summary directly in the MR:
+
+```
+Infrastructure changes:
+  + 1 resource to be added
+  ~ 0 resources to be changed
+  - 0 resources to be destroyed
+
+  + aws_instance.app_server
+      ami: "ami-0c55b159cbfafe1f0"
+      instance_type: "t3.micro"
+      tags.Environment: "staging"
+```
+
+Reviewers can see exactly what infrastructure will be created or modified before they approve the merge. This is the infrastructure equivalent of reviewing a code diff.
 
 ---
 
-## Additional Resources
-- [GitLab Infrastructure as Code: Terraform Integration Guide](https://docs.gitlab.com/ee/user/infrastructure/terraform_state.html)
-- [HashiCorp Terraform HTTP Backend Documentation](https://developer.hashicorp.com/terraform/language/settings/backends/http)
-- [Best Practices for Managing AWS Credentials in Terraform Pipelines](https://docs.aws.amazon.com/general/latest/gr/aws-access-keys-best-practices.html)
+## Recommended Repository Structure
+
+```
+terraform-infra/
+├── .gitlab-ci.yml           # Pipeline configuration
+├── main.tf                  # Provider and backend configuration
+├── variables.tf             # Input variable declarations
+├── outputs.tf               # Output value declarations
+├── environments/
+│   ├── staging.tfvars       # Variable values for staging
+│   └── production.tfvars    # Variable values for production
+├── modules/
+│   ├── networking/          # Reusable VPC/subnet module
+│   └── compute/             # Reusable EC2/instance module
+└── README.md
+```
+
+Using `.tfvars` files per environment (and referencing them in the plan command with `-var-file="environments/staging.tfvars"`) keeps environment-specific values organized and version-controlled.
+
+---
+
+## Key Security Practices
+
+1. **Never commit AWS credentials** — Use IAM roles (if running on AWS) or GitLab CI/CD variables (protected + masked) for `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+
+2. **Use `$CI_JOB_TOKEN` for state backend auth** — It is short-lived, auto-generated, and requires no manual rotation
+
+3. **Protect the `main` branch** — Apply and destroy jobs use `rules` tied to `main`; protecting the branch prevents unauthorized actors from triggering them
+
+4. **Always apply from a saved plan** — Using `terraform apply tfplan.binary` guarantees that what you apply is exactly what was reviewed in the MR, preventing drift
+
+5. **Never run `terraform apply` without a preceding `terraform plan`** in your pipeline — the two-stage approach (plan in MR → apply on merge) is the safe pattern
+
+---
+
+## Summary
+
+| Terraform Command | Pipeline Stage | Purpose |
+|---|---|---|
+| `terraform fmt -check` | validate | Enforce formatting standards |
+| `terraform validate` | validate | Check configuration syntax |
+| `terraform plan -out=tfplan` | plan | Generate and save execution plan |
+| `terraform show -json tfplan` | plan | Export plan for MR report |
+| `terraform apply tfplan` | apply | Apply saved plan to infrastructure |
+| `terraform destroy` | destroy | Tear down all managed resources |
+
+| Concept | Description |
+|---|---|
+| HTTP backend | GitLab-hosted Terraform state storage |
+| `$CI_JOB_TOKEN` | Short-lived token for backend auth |
+| `$CI_PROJECT_ID` | Used to construct the state backend URL |
+| `when: manual` | Requires human approval before running |
+| MR plan report | Infrastructure diff shown in the MR UI |
+
+---
+
+## External Resources
+
+- [GitLab Terraform HTTP backend documentation](https://docs.gitlab.com/ee/user/infrastructure/iac/terraform_state.html)
+- [GitLab CI/CD with Terraform tutorial](https://docs.gitlab.com/ee/user/infrastructure/iac/gitlab_terraform_helpers.html)
+- [Terraform CLI documentation (HashiCorp)](https://developer.hashicorp.com/terraform/cli)

@@ -1,156 +1,357 @@
-# Amazon EC2 Auto Scaling: Maintaining Application Availability and Performance
+# EC2 Auto Scaling
 
 ## Learning Objectives
-- Explain the purpose and business benefits of EC2 Auto Scaling.
-- Define the configuration components of an Auto Scaling Group: Launch Templates and Capacity Boundaries (min, max, desired).
-- Differentiate between various scaling policies: Target Tracking, Step Scaling, and Scheduled Scaling.
-- Detail how Amazon CloudWatch alarms trigger Auto Scaling adjustments.
-- Compare EC2 Instance status health checks with Application Load Balancer (ALB) health checks.
+
+By the end of this lesson, you will be able to:
+
+- Explain what Auto Scaling is and the problem it solves
+- Configure a Launch Template for repeatable instance launches
+- Define minimum, maximum, and desired capacity for a scaling group
+- Set up the three types of scaling policies
+- Understand how CloudWatch alarms trigger scaling events
+- Explain how health checks enable automatic instance replacement
 
 ---
 
 ## Why This Matters
-Application traffic fluctuates constantly. A Spring Boot API might handle millions of requests during normal business hours, but experience near-zero traffic at 3:00 AM. If you deploy your application on a fixed set of EC2 instances, you face a double penalty: you either over-provision compute and waste money, or you under-provision and risk system crashes due to resource exhaustion under high load.
 
-Amazon EC2 Auto Scaling solves this by automatically adjusting the number of EC2 instances in response to actual application demand. It ensures your infrastructure dynamically shrinks and expands, maximizing resource utilization while maintaining consistent performance and uptime.
+One of the promises of cloud computing is elasticity — the ability to grow and shrink your infrastructure automatically in response to real demand. Without Auto Scaling, you face a painful choice: over-provision (pay for idle capacity 24/7) or under-provision (let your app crash under load). Auto Scaling solves this by continuously matching your server count to your actual traffic. It is the cornerstone of cost-efficient, resilient cloud architectures and directly enables the deployment patterns you will use throughout Week 8.
 
 ---
 
-## The Concept
+## What Is EC2 Auto Scaling?
 
-### 1. What is an Auto Scaling Group (ASG)?
-An **Auto Scaling Group** is a collection of EC2 instances managed as a logical unit. The ASG dynamically adjusts its instance count to match current load metrics.
+**EC2 Auto Scaling** automatically adjusts the number of EC2 instances in a group based on demand, health checks, or a schedule. It works in three directions:
+
+- **Scale out:** Add instances when load increases
+- **Scale in:** Remove instances when load decreases
+- **Replace:** Automatically replace unhealthy instances
+
+### Analogy
+
+Think of a call center that staffs up during business hours and sends agents home at night. Auto Scaling is the manager that automatically calls in more agents when the phone queue backs up, and sends agents home early when calls slow down — except it happens in seconds rather than hours.
+
+---
+
+## Core Components
 
 ```
-       +-------------------------------------------------------+
-       |                  AUTO SCALING GROUP                   |
-       |                                                       |
-       |  Min: 2  <====>  Desired: 3  <====>  Max: 6           |
-       |                                                       |
-       |  +------------+   +------------+   +------------+     |
-       |  |  Instance  |   |  Instance  |   |  Instance  |     |
-       |  |  Running   |   |  Running   |   |  Running   |     |
-       |  +------------+   +------------+   +------------+     |
-       +-------------------------------------------------------+
+┌─────────────────────────────────────────────────────┐
+│              Auto Scaling Group (ASG)               │
+│                                                     │
+│  ┌──────────────┐    ┌──────────────────────────┐  │
+│  │    Launch    │    │    Scaling Policies       │  │
+│  │   Template   │    │  (when to add/remove)     │  │
+│  │ (what to     │    └──────────────────────────┘  │
+│  │  launch)     │                 ▲                │
+│  └──────────────┘                 │                │
+│         │                 CloudWatch Alarms         │
+│         ▼                         │                │
+│   [EC2] [EC2] [EC2]              Metrics           │
+│    min=1  desired=2  max=5                          │
+└─────────────────────────────────────────────────────┘
 ```
 
-### 2. Core Configuration Components
-To configure an ASG, you must define two things: **what** to launch, and **where/how many** to launch.
-
-#### Launch Templates (What to Launch)
-A **Launch Template** replaces legacy "Launch Configurations." It defines the configuration blueprint for instances built by the ASG:
-- The base OS image (AMI ID).
-- The instance type (e.g., `t3.micro`).
-- Key pairs, security groups, and storage volumes (EBS).
-- User Data scripts (shell scripts executed automatically on boot to download code, install updates, and start service scripts).
-
-#### Group Capacity Boundaries (How Many to Launch)
-An ASG operates within strict size boundaries:
-- **Min Capacity**: The lower limit of running instances. The ASG will never scale below this number, even if load is zero.
-- **Max Capacity**: The upper limit of running instances. It acts as a safety budget cap, ensuring scaling events cannot exceed expected resource costs.
-- **Desired Capacity**: The target number of instances the ASG should run *right now*. When first initialized, the ASG launches this exact count.
-
 ---
 
-### 3. Scaling Policies
-How does the ASG know when to add or remove instances? It uses scaling policies:
-- **Target Tracking Scaling**: You select a target metric (e.g., "Keep average CPU usage at 50%"). The ASG automatically handles the math to scale up or down to keep that metric stable. This is the recommended policy for general web workloads.
-- **Step Scaling**: Increases or decreases instance counts in steps based on the magnitude of metric violation. For example: "If CPU is between 60% and 75%, add 1 instance. If CPU is above 75%, add 3 instances."
-- **Scheduled Scaling**: Adjusts instance limits based on time patterns. Excellent when traffic spikes are highly predictable, such as scaling up ahead of a major retail event or scaling down over weekends.
+## Launch Templates
 
----
+A **Launch Template** defines the configuration of the instances that Auto Scaling will launch. It answers the question: "When Auto Scaling needs to add an instance, what should it look like?"
 
-### 4. CloudWatch Alarms: The Scaling Trigger
-AWS uses **Amazon CloudWatch** to collect system metrics (CPU utilization, network traffic, custom app logs).
-1.  **Metric Collection**: Running instances feed metrics to CloudWatch.
-2.  **Alarm Trigger**: You define a threshold (e.g., "CPU utilization > 80% for 3 consecutive minutes"). If met, CloudWatch fires an alarm.
-3.  **ASG Action**: The ASG intercepts the alarm and executes the associated scaling policy (e.g., "Launch 1 additional instance").
+### What a Launch Template Contains
 
----
+| Setting | Example |
+|---|---|
+| AMI ID | `ami-0abc123def456789` (your Golden AMI) |
+| Instance type | `t3.medium` |
+| Key pair | `my-key-pair` |
+| Security groups | `sg-0abc123def456789` |
+| IAM instance profile | `EC2-SSM-Role` |
+| User data script | Bootstrap script to start the app |
+| EBS volume config | 20 GiB gp3 root volume |
+| Tags | `Environment=production`, `App=myapp` |
 
-### 5. ASG Health Checks
-To maintain high availability, an ASG continuously monitors instance health. If an instance is flagged as unhealthy, the ASG terminates it and launches a fresh replacement.
-- **EC2 Health Checks (Default)**: Monitors the virtual machine's status. If the physical host hypervisor fails or the instance operating system hangs, the EC2 status checks fail.
-- **ELB (Elastic Load Balancer) Health Checks**: Monitors application status. The load balancer makes periodic HTTP requests to a target endpoint on the instance (e.g., `/health`). If the Spring Boot process crashes or runs out of database connections, `/health` will return a `500` error or time out. The load balancer flags the instance as unhealthy, prompting the ASG to replace it.
+### Creating a Launch Template (Console)
 
----
+1. **EC2 → Launch Templates → Create launch template**
+2. Fill in:
+   - **Template name:** `myapp-launch-template`
+   - **AMI:** Your Golden AMI ID
+   - **Instance type:** `t3.medium`
+   - **Key pair:** `my-key-pair`
+   - **Security groups:** `myapp-sg`
+   - **User data:** (optional startup script)
+3. Click **Create launch template**
 
-## Code Examples and Walkthroughs
-
-### 1. Defining a Target Tracking scaling policy via CLI
-Below is the configuration pattern used to establish a target tracking scaling policy for an existing Auto Scaling Group:
-
-```json
-// target-tracking-cpu.json
-{
-  "TargetValue": 60.0,
-  "PredefinedMetricSpecification": {
-    "PredefinedMetricType": "ASGAverageCPUUtilization"
-  }
-}
-```
+### Creating a Launch Template (CLI)
 
 ```bash
-# Register the target tracking policy with an Auto Scaling Group
+aws ec2 create-launch-template \
+  --launch-template-name myapp-launch-template \
+  --version-description "v1 - initial" \
+  --launch-template-data '{
+    "ImageId": "ami-0abc123def456789",
+    "InstanceType": "t3.medium",
+    "KeyName": "my-key-pair",
+    "SecurityGroupIds": ["sg-0abc123def456789"],
+    "IamInstanceProfile": {
+      "Name": "EC2-SSM-Role"
+    },
+    "UserData": "IyEvYmluL2Jhc2gKamF2YSAtamFyIC9vcHQvbXlhcHAvYXBwLmphciAmCg==",
+    "TagSpecifications": [{
+      "ResourceType": "instance",
+      "Tags": [
+        {"Key": "Name", "Value": "myapp-asg-instance"},
+        {"Key": "Environment", "Value": "production"}
+      ]
+    }]
+  }'
+```
+
+> The `UserData` value is Base64-encoded. Encode your script with: `base64 -w 0 bootstrap.sh`
+
+---
+
+## Min, Max, and Desired Capacity
+
+Every Auto Scaling Group (ASG) has three capacity settings:
+
+| Setting | Meaning | Example |
+|---|---|---|
+| **Minimum** | ASG will never have fewer than this many instances | `1` |
+| **Desired** | ASG targets this count under normal conditions | `2` |
+| **Maximum** | ASG will never exceed this many instances | `10` |
+
+```
+Instances: 1 ──────────── 2 ──────────── 10
+           ▲              ▲              ▲
+        Minimum        Desired         Maximum
+      (always keep   (normal state)  (never exceed)
+       at least 1)
+```
+
+### Practical Rules
+
+- **Minimum ≥ 1** for production: ensures there is always at least one instance serving traffic even if scaling logic has a bug.
+- **Desired** starts at the minimum or your estimated normal load.
+- **Maximum** caps your spending and prevents runaway scaling from a bug.
+
+### Creating an Auto Scaling Group (CLI)
+
+```bash
+aws autoscaling create-auto-scaling-group \
+  --auto-scaling-group-name myapp-asg \
+  --launch-template "LaunchTemplateName=myapp-launch-template,Version=\$Latest" \
+  --min-size 1 \
+  --max-size 10 \
+  --desired-capacity 2 \
+  --vpc-zone-identifier "subnet-0abc123,subnet-0def456" \  # Subnets across multiple AZs
+  --health-check-type ELB \                                # Use load balancer health checks
+  --health-check-grace-period 300 \                        # Wait 300s before checking new instances
+  --tags Key=Name,Value=myapp-asg-instance,PropagateAtLaunch=true
+```
+
+---
+
+## Scaling Policies
+
+Scaling policies define *when* and *by how much* to scale. There are three types.
+
+### 1. Target Tracking Scaling (Recommended for Most Cases)
+
+Target tracking is the simplest and most intelligent policy. You specify a target value for a metric, and AWS automatically adjusts capacity to keep the metric at that target.
+
+**Analogy:** Like cruise control in a car — you set the target speed, the car adjusts the throttle automatically.
+
+```bash
 aws autoscaling put-scaling-policy \
-    --policy-name cpu-target-tracking-policy \
-    --auto-scaling-group-name project3-web-asg \
-    --policy-type TargetTrackingScaling \
-    --target-tracking-configuration file://target-tracking-cpu.json
-
-# The CLI returns policy details including the CloudWatch alarm metadata created automatically.
+  --auto-scaling-group-name myapp-asg \
+  --policy-name myapp-cpu-target-tracking \
+  --policy-type TargetTrackingScaling \
+  --target-tracking-configuration '{
+    "PredefinedMetricSpecification": {
+      "PredefinedMetricType": "ASGAverageCPUUtilization"
+    },
+    "TargetValue": 60.0,
+    "DisableScaleIn": false
+  }'
 ```
 
-### 2. Simulating User Data in a Launch Template
-A Launch Template's User Data contains bash commands to run at boot. Here is a typical script to install Java 17 and pull a Spring Boot app:
+This policy keeps average CPU utilization at 60%. If CPU exceeds 60%, AWS adds instances. If CPU drops significantly below 60%, AWS removes instances.
+
+**Common Target Tracking Metrics:**
+
+| Metric | Target Value | Meaning |
+|---|---|---|
+| `ASGAverageCPUUtilization` | 60.0 | Keep average CPU at 60% |
+| `ALBRequestCountPerTarget` | 1000 | Keep 1000 requests/instance/minute |
+| `ASGAverageNetworkIn` | 10000000 | Keep avg network in at 10 MB/s |
+
+### 2. Step Scaling
+
+Step scaling lets you define different scaling amounts for different alarm thresholds. Useful when you want aggressive scale-out but conservative scale-in.
 
 ```bash
-#!/bin/bash
-# 1. Update OS package lists
-yum update -y
+# First, create a CloudWatch alarm
+aws cloudwatch put-metric-alarm \
+  --alarm-name myapp-high-cpu \
+  --metric-name CPUUtilization \
+  --namespace AWS/EC2 \
+  --statistic Average \
+  --period 60 \                    # Evaluate every 60 seconds
+  --threshold 75 \                 # Trigger when CPU > 75%
+  --comparison-operator GreaterThanThreshold \
+  --evaluation-periods 2 \         # Alarm triggers after 2 consecutive periods
+  --dimensions Name=AutoScalingGroupName,Value=myapp-asg \
+  --alarm-actions arn:aws:autoscaling:us-east-1:123456789012:scalingPolicy:...
 
-# 2. Install OpenJDK 17
-yum install java-17-amazon-corretto-devel -y
+# Then, create the step scaling policy
+aws autoscaling put-scaling-policy \
+  --auto-scaling-group-name myapp-asg \
+  --policy-name myapp-step-scale-out \
+  --policy-type StepScaling \
+  --adjustment-type ChangeInCapacity \
+  --step-adjustments '[
+    {
+      "MetricIntervalLowerBound": 0,
+      "MetricIntervalUpperBound": 20,
+      "ScalingAdjustment": 1
+    },
+    {
+      "MetricIntervalLowerBound": 20,
+      "ScalingAdjustment": 3
+    }
+  ]'
+```
 
-# 3. Download the Spring Boot executable JAR from AWS S3
-# (Note: Requires the EC2 Instance Profile IAM role to have S3 read permissions)
-aws s3 cp s3://project3-deployments-bucket/api.jar /opt/api.jar
+This policy:
+- Adds 1 instance when CPU is 75–95%
+- Adds 3 instances when CPU is above 95%
 
-# 4. Create a systemd service file to run the Java app cleanly in the background
-cat <<EOF > /etc/systemd/system/springboot-api.service
-[Unit]
-Description=Spring Boot API Application
-After=network.target
+### 3. Scheduled Scaling
 
-[Service]
-User=root
-ExecStart=/usr/bin/java -jar /opt/api.jar --spring.profiles.active=prod
-SuccessExitStatus=143
-Restart=always
-RestartSec=10
+Scheduled scaling adjusts capacity at specific times. Ideal for predictable traffic patterns.
 
-[Install]
-WantedBy=multi-user.target
-EOF
+```bash
+# Scale up every weekday morning at 8:00 AM UTC
+aws autoscaling put-scheduled-update-group-action \
+  --auto-scaling-group-name myapp-asg \
+  --scheduled-action-name scale-up-morning \
+  --recurrence "0 8 * * 1-5" \      # Cron: 8am Monday-Friday
+  --desired-capacity 5 \
+  --min-size 3
 
-# 5. Reload systemd config, enable and start the service
-systemctl daemon-reload
-systemctl enable springboot-api
-systemctl start springboot-api
+# Scale down every weekday evening at 6:00 PM UTC
+aws autoscaling put-scheduled-update-group-action \
+  --auto-scaling-group-name myapp-asg \
+  --scheduled-action-name scale-down-evening \
+  --recurrence "0 18 * * 1-5" \     # Cron: 6pm Monday-Friday
+  --desired-capacity 2 \
+  --min-size 1
+```
+
+---
+
+## CloudWatch Alarms
+
+**CloudWatch Alarms** watch metrics and trigger actions (like scaling) when thresholds are crossed.
+
+### Alarm States
+
+| State | Meaning |
+|---|---|
+| `OK` | Metric is within the threshold |
+| `ALARM` | Metric has breached the threshold |
+| `INSUFFICIENT_DATA` | Not enough data points yet |
+
+### Common Metrics for Scaling
+
+| Metric | Namespace | When to Scale Out |
+|---|---|---|
+| `CPUUtilization` | `AWS/EC2` | > 70% for 2 minutes |
+| `RequestCountPerTarget` | `AWS/ApplicationELB` | > 1000/minute/instance |
+| `MemoryUtilization` | `CWAgent` (custom) | > 80% |
+| `ActiveConnectionCount` | `AWS/ApplicationELB` | > 5000 |
+
+### Viewing Alarm Status
+
+```bash
+aws cloudwatch describe-alarms \
+  --alarm-names myapp-high-cpu \
+  --query 'MetricAlarms[0].{State:StateValue,Reason:StateReason}'
+```
+
+---
+
+## Health Checks and Automatic Replacement
+
+One of Auto Scaling's most powerful features is **automatic instance replacement**. If an instance fails a health check, Auto Scaling terminates it and launches a replacement.
+
+### Health Check Types
+
+| Type | What It Checks |
+|---|---|
+| **EC2 (default)** | Instance status checks (hardware/hypervisor level) |
+| **ELB** | Whether the load balancer reports the instance as healthy |
+
+### Health Check Grace Period
+
+When a new instance launches, it needs time to boot and start the application before health checks run. The **grace period** (default 300 seconds) pauses health checking for new instances.
+
+```
+Instance launches
+       │
+       │  [300 second grace period — no health checks]
+       │
+       ▼
+Health checks begin
+  Pass → Instance stays in service
+  Fail → Instance terminated; replacement launched
+```
+
+### Viewing ASG Activity
+
+```bash
+# See recent scaling activities
+aws autoscaling describe-scaling-activities \
+  --auto-scaling-group-name myapp-asg \
+  --max-items 10 \
+  --query 'Activities[*].{Time:StartTime,Status:StatusCode,Description:Description}' \
+  --output table
+```
+
+---
+
+## Cooldown Periods
+
+After a scaling event, Auto Scaling waits a **cooldown period** (default 300 seconds) before evaluating alarms again. This prevents rapid repeated scaling triggered by the same spike.
+
+```
+Scale out event (add 2 instances)
+       │
+       │  [300 second cooldown — ignore alarms]
+       │
+       ▼
+Resume monitoring → evaluate alarms normally
 ```
 
 ---
 
 ## Summary
-- **EC2 Auto Scaling** maintains application performance by scaling instance fleets dynamically according to workloads.
-- **Launch Templates** record deployment blueprints (AMI, networking, security groups, and User Data script instructions).
-- **Capacity Parameters** (min, max, desired) form the operational guardrails of an Auto Scaling Group.
-- **CloudWatch Alarms** monitor performance metrics and trigger scaling policies automatically.
-- **ELB Health Checks** verify that applications are functional at the HTTP layer, not just that the virtual machine is powered on.
+
+- Auto Scaling matches EC2 instance count to real demand, eliminating over/under-provisioning.
+- Launch Templates define what gets launched: AMI, instance type, security groups, user data.
+- Min/Desired/Max capacity set the bounds; Auto Scaling keeps instance count within these limits.
+- Target Tracking is the recommended policy — set a target metric value; AWS adjusts automatically.
+- Step Scaling gives fine-grained control for different threshold levels.
+- Scheduled Scaling handles predictable patterns (business hours, weekly cycles).
+- CloudWatch Alarms watch metrics and trigger scaling actions.
+- Health checks enable automatic replacement of failed instances.
 
 ---
 
-## Additional Resources
-- [AWS documentation: What is Amazon EC2 Auto Scaling?](https://docs.aws.amazon.com/autoscaling/ec2/userguide/what-is-amazon-ec2-autoscaling.html)
-- [AWS Guide: EC2 Launch Templates](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-launch-templates.html)
-- [AWS Guide: Monitor Auto Scaling Groups using CloudWatch](https://docs.aws.amazon.com/autoscaling/ec2/userguide/as-scale-based-on-demand.html)
+## External Resources
+
+- [EC2 Auto Scaling User Guide](https://docs.aws.amazon.com/autoscaling/ec2/userguide/what-is-amazon-ec2-auto-scaling.html)
+- [Scaling Policy Types Explained](https://docs.aws.amazon.com/autoscaling/ec2/userguide/as-scaling-simple-step.html)
+- [CloudWatch Metrics for EC2 Auto Scaling](https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-cloudwatch-monitoring.html)

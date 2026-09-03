@@ -1,0 +1,140 @@
+# docker-compose-solution.yml
+# Week 8 Thursday — Complete Working Solution
+# Every line is annotated with its purpose.
+
+services:
+
+  # ── Spring Boot Application ──────────────────────────────────────────────────
+  app:
+    build: .
+    # Build the image from the Dockerfile in the current directory.
+    # Docker will look for ./Dockerfile and use it as the build context.
+
+    ports:
+      - "8080:8080"
+    # Expose container port 8080 on host port 8080.
+    # Format is "host:container". Only used for direct access during dev;
+    # in production, Nginx handles all inbound traffic on port 80.
+
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/appdb
+      # 'db' is the service name — Docker Compose's built-in DNS resolves
+      # service names to their container IP addresses within the same network.
+
+      SPRING_DATASOURCE_USERNAME: appuser
+      # Must exactly match POSTGRES_USER in the db service.
+
+      SPRING_DATASOURCE_PASSWORD: securepassword123
+      # Must exactly match POSTGRES_PASSWORD in the db service.
+      # In production, replace with a Docker secret or environment-injected value.
+
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+      # Hibernate auto-creates/updates schema on startup.
+      # Use 'validate' or 'none' in production.
+
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/actuator/health"]
+      # wget is available on Alpine images. It checks that the actuator
+      # health endpoint responds before Docker considers the container healthy.
+      interval: 30s      # Check every 30 seconds after start_period elapses
+      timeout: 10s       # Fail the check if no response within 10 seconds
+      retries: 5         # Mark unhealthy after 5 consecutive failures
+      start_period: 60s  # Give Spring Boot 60 seconds to start before counting failures
+
+    depends_on:
+      db:
+        condition: service_healthy
+    # Docker Compose will not start the app container until the db container
+    # passes its own healthcheck. Without this, Spring Boot often fails on
+    # startup because PostgreSQL is not yet ready to accept connections.
+
+    networks:
+      - backend
+    # Attach to the backend network so it can reach 'db' by service name.
+
+    restart: unless-stopped
+    # Automatically restart if the container crashes, but respect an explicit
+    # 'docker stop' command.
+
+  # ── PostgreSQL Database ───────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    # Always pin to a specific major.minor version.
+    # Alpine variant is ~80MB vs ~400MB for the Debian variant.
+
+    environment:
+      POSTGRES_DB: appdb
+      # The database name to create on first startup.
+      # Must match the database name in SPRING_DATASOURCE_URL.
+
+      POSTGRES_USER: appuser
+      # The superuser for the POSTGRES_DB database.
+      # Must match SPRING_DATASOURCE_USERNAME.
+
+      POSTGRES_PASSWORD: securepassword123
+      # The password for POSTGRES_USER.
+      # Must match SPRING_DATASOURCE_PASSWORD.
+      # In production: use Docker secrets (docker secret create) and
+      # reference with POSTGRES_PASSWORD_FILE instead.
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Mount the named volume to the directory where PostgreSQL stores
+    # all its data files. Without this, all data is lost when the
+    # container is removed.
+
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "appuser"]
+      # pg_isready exits 0 when the database is ready to accept connections.
+      # The -U flag specifies the username to check — must match POSTGRES_USER.
+      interval: 10s   # Check frequently during startup
+      timeout: 5s
+      retries: 5
+
+    networks:
+      - backend
+
+    restart: unless-stopped
+
+  # ── Nginx Reverse Proxy ───────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    # Nginx as a reverse proxy in front of Spring Boot.
+    # Benefits: SSL termination, request buffering, static file serving.
+
+    ports:
+      - "80:80"
+    # Only Nginx exposes port 80 to the host. The app service's 8080
+    # mapping is only needed for direct debugging access.
+
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    # Bind-mount the Nginx config from the host into the container.
+    # :ro (read-only) prevents the container from modifying the file.
+
+    depends_on:
+      - app
+    # Start after app is running. Note: this does not wait for app to be
+    # healthy — only for the container to be running.
+
+    networks:
+      - backend
+
+    restart: unless-stopped
+
+# ── Named Volumes ─────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+    driver: local
+  # Named volumes persist beyond container lifecycle.
+  # 'docker compose down' removes containers but leaves this volume.
+  # 'docker compose down --volumes' removes the volume too (data loss).
+  # The volume lives at: /var/lib/docker/volumes/projectname_postgres_data/_data
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  backend:
+    driver: bridge
+  # A user-defined bridge network provides automatic DNS resolution
+  # between containers (by service name) and network isolation from
+  # other containers on the host.

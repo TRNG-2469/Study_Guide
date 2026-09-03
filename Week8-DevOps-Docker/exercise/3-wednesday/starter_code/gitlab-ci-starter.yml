@@ -1,0 +1,140 @@
+# =============================================================================
+# GitLab CI/CD Starter Pipeline — Project 3 Spring Boot Backend
+# Week 8 Wednesday Lab
+#
+# Instructions:
+#   1. Replace every "# TODO" comment with the correct value or keyword.
+#   2. Do NOT change keywords that are already filled in (stage, when, cache, etc.)
+#   3. Push this file as .gitlab-ci.yml at the root of your Project 3 repo.
+#   4. Watch the pipeline run in GitLab → CI/CD → Pipelines.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# STAGES
+# Defines the order in which job groups run.
+# Jobs in the same stage run in PARALLEL.
+# Jobs in the next stage wait for ALL jobs in the previous stage to pass.
+# -----------------------------------------------------------------------------
+stages:
+  - build
+  - test
+  - deploy
+
+
+# -----------------------------------------------------------------------------
+# GLOBAL VARIABLES
+# These are available in every job's script section as environment variables.
+# MAVEN_OPTS tells Maven to store downloaded dependencies inside the project
+# directory so GitLab's cache system can save and restore them.
+# -----------------------------------------------------------------------------
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
+
+
+# -----------------------------------------------------------------------------
+# GLOBAL CACHE
+# GitLab saves the listed paths between pipeline runs.
+# cache.key uses the branch name so each branch has its own independent cache.
+# This prevents a feature branch from corrupting the main branch cache.
+# -----------------------------------------------------------------------------
+cache:
+  key: "$CI_COMMIT_REF_SLUG"
+  paths:
+    - .m2/repository
+
+
+# =============================================================================
+# JOB 1: build-app
+# Stage: build
+# Purpose: Compile the source code and package a runnable JAR file.
+#          The JAR is stored as a pipeline artifact so later jobs can use it.
+# =============================================================================
+build-app:
+  stage: build
+
+  # The Docker image that provides Java + Maven for this job.
+  # GitLab pulls this image from Docker Hub and runs your script inside it.
+  image: # TODO: Replace with the correct Maven + Java 17 image.
+         #       Search Docker Hub for "maven" and pick the eclipse-temurin-17 tag.
+         #       Format: maven:<version>-eclipse-temurin-<java-version>
+
+  script:
+    # TODO: Write the Maven command that compiles and packages the project.
+    #       You want to create a JAR but skip running tests (tests run in the next stage).
+    #       Hint: mvn package ...
+
+  # Artifacts are files GitLab saves after a job completes.
+  # Other jobs can download them, and they appear in the GitLab pipeline UI.
+  artifacts:
+    paths:
+      # TODO: Specify the path to the JAR file Maven produces.
+      #       Maven always outputs build artifacts to the target/ directory.
+      #       Use a glob pattern so it works regardless of the JAR filename.
+    expire_in: # TODO: How long should GitLab keep this artifact?
+               #       Examples: 1 hour | 1 day | 1 week
+
+
+# =============================================================================
+# JOB 2: test-app
+# Stage: test
+# Purpose: Run the project's unit and integration tests.
+#          Publishes JUnit XML reports so GitLab can display pass/fail counts.
+# =============================================================================
+test-app:
+  stage: test
+
+  image: # TODO: Use the same Maven + Java 17 image as build-app.
+
+  script:
+    # TODO: Write the Maven command that runs the tests.
+    #       Unlike the build job, do NOT skip tests here.
+    #       Hint: mvn test
+
+  artifacts:
+    # "when: always" means GitLab collects these artifacts even if tests fail.
+    # This is important — you want the failure report, not just the success report.
+    when: always
+    reports:
+      junit:
+        # TODO: Specify the path to the JUnit XML files Maven Surefire generates.
+        #       Surefire writes one XML file per test class.
+        #       Hint: target/surefire-reports/TEST-*.xml
+
+
+# =============================================================================
+# JOB 3: deploy-staging
+# Stage: deploy
+# Purpose: Deploy the built JAR to the staging environment.
+#          This job does NOT run automatically — a human must click the play button.
+# =============================================================================
+deploy-staging:
+  stage: deploy
+
+  # "when: manual" means this job waits for a human to trigger it.
+  # In the pipeline UI, it shows a ▶ play button instead of running automatically.
+  when: manual
+
+  # The environment block links this job to a GitLab Environment.
+  # GitLab tracks which commit is deployed where under Deployments → Environments.
+  environment:
+    name: staging
+    url: $DEPLOY_TARGET_URL   # Uses the masked CI/CD variable you created in Task 5
+
+  # "needs" declares an explicit dependency on the build-app job.
+  # artifacts: true downloads the JAR artifact from build-app before running scripts.
+  # Without this, the target/ directory would be empty in this job.
+  needs:
+    - job: build-app
+      artifacts: true
+
+  script:
+    # TODO: Add echo statements that show:
+    #   1. The deploy target URL (from $DEPLOY_TARGET_URL — will appear as [MASKED])
+    #   2. The JAR file found in target/ (use: ls target/*.jar)
+    #   3. The short commit SHA (from $CI_COMMIT_SHORT_SHA)
+    #   4. The pipeline ID (from $CI_PIPELINE_ID)
+    #
+    # In a real deployment, these echo statements would be replaced with:
+    #   - scp target/*.jar user@staging-server:/opt/app/
+    #   - ssh user@staging-server "systemctl restart project3"

@@ -1,0 +1,86 @@
+# =============================================================================
+#  spl-practice-queries.spl — Starter Queries for Week 8 Splunk Lab
+#  Complete each query by adding the missing pipe commands after each TODO.
+#  Run each query in Splunk Search & Reporting and record the results
+#  in the spaces provided in splunk-exercise.md (Parts 4 and 3).
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# QUERY 1 — Requests Per Minute
+# Goal: Show how many log events (requests) arrived each minute over the last
+#       hour so you can spot traffic spikes and quiet periods.
+# Expected output: a timechart with one row per minute and a count column.
+# -----------------------------------------------------------------------------
+
+index=main sourcetype=_json earliest=-1h
+# TODO: Add a timechart command that buckets events into 1-minute spans
+#       and counts the total events in each bucket.
+#       Hint: timechart span=1m count as "Requests"
+
+
+# -----------------------------------------------------------------------------
+# QUERY 2 — Error Rate Percentage
+# Goal: Compute what percentage of all requests in the last hour were errors
+#       (level=ERROR or status_code >= 500).
+# Expected output: a single-row table with columns total, errors, error_pct.
+# -----------------------------------------------------------------------------
+
+index=main sourcetype=_json earliest=-1h
+# TODO: Use eval and stats to compute:
+#   1. A field called "is_error" that equals 1 when level=ERROR, else 0
+#   2. stats to sum is_error as "errors" and count as "total"
+#   3. eval to compute error_pct = round(errors / total * 100, 2)
+#   4. table to show total, errors, error_pct
+#
+# Hint: eval is_error=if(level="ERROR" OR status_code>=500, 1, 0)
+
+
+# -----------------------------------------------------------------------------
+# QUERY 3 — Response Time Distribution Per Endpoint
+# Goal: For every unique endpoint value, show average, median (p50),
+#       95th percentile, 99th percentile, and maximum duration_ms.
+# Expected output: one row per endpoint with columns for each percentile.
+# -----------------------------------------------------------------------------
+
+index=main sourcetype=_json duration_ms=* earliest=-1h
+# TODO: Use a stats command to compute avg, perc50, perc95, perc99, and max
+#       of the duration_ms field, grouped by the endpoint field.
+#       Then sort by avg descending so the slowest endpoints appear first.
+#
+# Hint: stats avg(duration_ms) as avg_ms ... by endpoint
+
+
+# -----------------------------------------------------------------------------
+# QUERY 4 — Top Endpoints by Volume
+# Goal: Rank all endpoints by total request count so you know which paths
+#       receive the most traffic — useful for capacity planning.
+# Expected output: a table of endpoint, request_count sorted descending.
+# -----------------------------------------------------------------------------
+
+index=main sourcetype=_json earliest=-1h
+# TODO: Use stats to count events grouped by endpoint,
+#       rename the count field to request_count,
+#       sort descending by request_count,
+#       and limit to the top 10 results.
+#
+# Hint: | stats count as request_count by endpoint | sort ...
+
+
+# -----------------------------------------------------------------------------
+# QUERY 5 — Alert Threshold Check (used in Part 7)
+# Goal: Return a result ONLY when the error count in the last 5 minutes
+#       exceeds 10 — this is the query that powers the Week8 alert.
+# Expected output: one row with error_count > 10, or no rows if under threshold.
+# Explanation of approach:
+#   - Search for errors in the last 5 minutes
+#   - Count them with stats into error_count
+#   - Use where to filter out rows where the count is within acceptable range
+#   - Splunk alerts fire when the search returns at least 1 result
+# -----------------------------------------------------------------------------
+
+index=main sourcetype=_json level=ERROR earliest=-5m
+# TODO: Add stats to count all matching events as "error_count",
+#       then add a where clause to keep only results where error_count > 10.
+#
+# Hint: | stats count as error_count | where error_count > 10

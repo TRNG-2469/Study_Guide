@@ -1,0 +1,329 @@
+# =============================================================================
+# GitLab CI/CD — Complete Solution Pipeline
+# Project 3 Spring Boot Backend
+# Week 8 Wednesday Lab — SOLUTION FILE
+#
+# This file demonstrates a production-quality pipeline with:
+#   - Ordered stages (build → test → deploy)
+#   - Maven dependency caching to speed up repeat runs
+#   - JUnit test report integration
+#   - Masked CI/CD variable usage
+#   - Manual deploy gate with environment tracking
+#   - Parallel job execution with needs: graph
+#   - Rules-based branch filtering
+#   - Bonus: SonarCloud analysis placeholder
+#   - Bonus: Docker image build and push to GitLab Container Registry
+#   - Bonus: Slack/webhook notification job
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# STAGES — execution order
+# All jobs within one stage run in PARALLEL.
+# The next stage starts only when ALL jobs in the current stage succeed
+# (unless allow_failure: true is set on a job).
+# -----------------------------------------------------------------------------
+stages:
+  - build          # compile + package + docker image
+  - test           # unit tests + code quality
+  - deploy         # staging deploy (manual gate)
+  - notify         # post-deploy notification
+
+
+# -----------------------------------------------------------------------------
+# GLOBAL VARIABLES
+# Defined once here; available in every job's script section.
+#
+# MAVEN_OPTS: redirects Maven's local repository to a project-relative path
+#             (.m2/repository) so GitLab's cache system can persist it.
+#             Without this, Maven downloads ~60-100MB of JARs on every run.
+# -----------------------------------------------------------------------------
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
+  # DOCKER_TLS_CERTDIR is required when using Docker-in-Docker (dind) service.
+  DOCKER_TLS_CERTDIR: "/certs"
+
+
+# -----------------------------------------------------------------------------
+# GLOBAL CACHE
+# GitLab saves these paths at the end of each job and restores them at the start.
+# key: "$CI_COMMIT_REF_SLUG" — one cache bucket per branch name.
+#   This prevents cache pollution between branches (e.g., a feature branch
+#   installing a snapshot dependency that breaks the main branch cache).
+# -----------------------------------------------------------------------------
+cache:
+  key: "$CI_COMMIT_REF_SLUG"
+  paths:
+    - .m2/repository     # Maven local repository — the main cache win
+
+
+# =============================================================================
+# JOB: build-app
+# Stage: build
+#
+# Compiles the Spring Boot project and packages a fat JAR.
+# Stores the JAR as a pipeline artifact for downstream jobs and manual download.
+#
+# Why maven:3.9-eclipse-temurin-17?
+#   - Maven 3.9 is the current stable release
+#   - Eclipse Temurin 17 is the LTS JDK recommended for Spring Boot 3.x
+#   - This image is official and maintained by the Maven Docker team
+# =============================================================================
+build-app:
+  stage: build
+  image: maven:3.9-eclipse-temurin-17
+
+  script:
+    # -DskipTests: skip test EXECUTION (tests are still compiled)
+    # Running tests here would duplicate work — the test stage handles that.
+    - echo "Building project: $CI_PROJECT_NAME"
+    - echo "Commit: $CI_COMMIT_SHORT_SHA | Pipeline: $CI_PIPELINE_ID"
+    - mvn package -DskipTests
+    - echo "Build complete. Artifact:"
+    - ls -lh target/*.jar
+
+  artifacts:
+    # These files are stored by GitLab and can be:
+    #   1. Downloaded manually from the pipeline UI
+    #   2. Passed to downstream jobs via needs: + artifacts: true
+    paths:
+      - target/*.jar          # the runnable fat JAR
+    expire_in: 1 day          # auto-delete after 1 day to save storage
+
+
+# =============================================================================
+# JOB: print-variables
+# Stage: build (runs in PARALLEL with build-app)
+#
+# Demonstrates GitLab predefined CI/CD variables.
+# These are injected automatically — no configuration required.
+# Runs in parallel with build-app because both are in the build stage.
+# =============================================================================
+print-variables:
+  stage: build
+  image: alpine:latest   # Alpine is tiny (~5MB) — ideal for simple echo jobs
+
+  script:
+    - echo "=== GitLab Predefined Variables ==="
+    - echo "Full commit SHA   : $CI_COMMIT_SHA"
+    - echo "Short commit SHA  : $CI_COMMIT_SHORT_SHA"
+    - echo "Pipeline ID       : $CI_PIPELINE_ID"
+    - echo "Job name          : $CI_JOB_NAME"
+    - echo "Project name      : $CI_PROJECT_NAME"
+    - echo "Branch name       : $CI_COMMIT_BRANCH"
+    - echo "Runner description: $CI_RUNNER_DESCRIPTION"
+    - echo "GitLab host       : $CI_SERVER_URL"
+
+
+# =============================================================================
+# JOB: test-app
+# Stage: test
+#
+# Runs the full test suite and publishes JUnit XML so GitLab surfaces results
+# in the pipeline UI and in merge request widgets (test pass/fail counts).
+#
+# artifacts.when: always — collect the XML even when tests fail.
+#   If this were "on_success" (the default), a test failure would prevent
+#   GitLab from receiving the report, defeating the purpose of collecting it.
+# =============================================================================
+test-app:
+  stage: test
+  image: maven:3.9-eclipse-temurin-17
+
+  # needs: [] means this job does NOT wait for build-app's JAR artifact.
+  # It re-runs the Maven lifecycle from scratch (compile → test).
+  # This is intentional: the test job should be independent and self-contained.
+  # If you need the artifact (e.g., for integration tests), add needs: [build-app].
+
+  script:
+    - echo "Running tests for $CI_PROJECT_NAME @ $CI_COMMIT_SHORT_SHA"
+    - mvn test
+    - echo "Test run complete."
+
+  artifacts:
+    when: always     # collect reports whether tests pass OR fail
+    reports:
+      junit:
+        # Maven Surefire writes one XML file per test class.
+        # The glob TEST-*.xml captures all of them.
+        # GitLab parses these and displays counts in the pipeline sidebar.
+        - target/surefire-reports/TEST-*.xml
+
+
+# =============================================================================
+# JOB: sonar-analysis (Bonus A)
+# Stage: test (runs in PARALLEL with test-app)
+#
+# Runs SonarCloud static analysis. allow_failure: true means a Sonar failure
+# does not block the pipeline — code quality is advisory, not a hard gate.
+#
+# Required CI/CD variable (masked):
+#   SONAR_TOKEN — generate at sonarcloud.io → My Account → Security
+# =============================================================================
+sonar-analysis:
+  stage: test
+  image: maven:3.9-eclipse-temurin-17
+
+  # allow_failure: true — Sonar failures surface as warnings (orange),
+  # not failures (red). The pipeline continues to the deploy stage.
+  allow_failure: true
+
+  # Only run Sonar on main and develop — not on every feature branch.
+  # This avoids consuming Sonar analysis quota on short-lived branches.
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop"'
+
+  script:
+    - echo "Running SonarCloud analysis..."
+    - mvn verify sonar:sonar
+        -Dsonar.projectKey=${SONAR_PROJECT_KEY}
+        -Dsonar.host.url=https://sonarcloud.io
+        -Dsonar.login=$SONAR_TOKEN
+  # Note: SONAR_PROJECT_KEY can be a plain (non-masked) CI/CD variable.
+  # SONAR_TOKEN must be masked because it is a secret.
+
+
+# =============================================================================
+# JOB: docker-build (Bonus C)
+# Stage: build (runs in PARALLEL with build-app and print-variables)
+#
+# Builds a Docker image from the Dockerfile at the project root and pushes it
+# to the GitLab Container Registry using predefined $CI_REGISTRY_* variables.
+#
+# Predefined variables used:
+#   $CI_REGISTRY          — registry hostname (registry.gitlab.com)
+#   $CI_REGISTRY_IMAGE    — full image path (registry.gitlab.com/group/project)
+#   $CI_REGISTRY_USER     — GitLab user for registry auth (injected by GitLab)
+#   $CI_REGISTRY_PASSWORD — temporary job token for registry auth (injected)
+#   $CI_COMMIT_SHORT_SHA  — used as the image tag (7-char commit hash)
+# =============================================================================
+docker-build:
+  stage: build
+  image: docker:24               # Docker CLI image
+  services:
+    - docker:24-dind             # Docker daemon (Docker-in-Docker)
+
+  # Only build Docker images on main and develop — feature branches skip this.
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop"'
+
+  script:
+    - echo "Logging into GitLab Container Registry..."
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+
+    - echo "Building image: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .
+    - docker tag  $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA $CI_REGISTRY_IMAGE:latest
+
+    - echo "Pushing image to registry..."
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+    - docker push $CI_REGISTRY_IMAGE:latest
+    - echo "Image pushed. View at: $CI_SERVER_URL/$CI_PROJECT_PATH/container_registry"
+
+
+# =============================================================================
+# JOB: deploy-staging
+# Stage: deploy
+#
+# Deploys the built JAR to the staging environment.
+# Gated behind when: manual — a human must click ▶ in the pipeline UI.
+#
+# needs: [build-app] with artifacts: true —
+#   This job skips waiting for the full test stage and downloads only the JAR
+#   from build-app. In production you would include test-app in needs: to ensure
+#   tests passed before any deployment.
+#
+# environment: — links this job to a GitLab Environment, which enables:
+#   - Deployment history (who deployed what commit when)
+#   - Rollback button in the GitLab UI
+#   - Environment-specific protected variables
+# =============================================================================
+deploy-staging:
+  stage: deploy
+  image: alpine:latest
+
+  # when: manual — the job appears in the pipeline with a ▶ play button.
+  # The pipeline does not block on this job — it is skipped until triggered.
+  when: manual
+
+  # rules: ensure this job only appears on protected branches.
+  # On feature branches, the job is completely hidden (not just blocked).
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+      when: manual
+    - when: never     # hide on all other branches (feature/, hotfix/, etc.)
+
+  environment:
+    name: staging
+    url: $DEPLOY_TARGET_URL   # masked variable — shown in Environments UI as a clickable link
+
+  # Download the JAR artifact from build-app without waiting for test-app.
+  # For production pipelines, add test-app here to enforce "tests must pass first".
+  needs:
+    - job: build-app
+      artifacts: true   # pulls target/*.jar into this job's workspace
+
+  script:
+    - echo "=== Staging Deployment ==="
+    - echo "Project    : $CI_PROJECT_NAME"
+    - echo "Commit     : $CI_COMMIT_SHORT_SHA"
+    - echo "Pipeline   : $CI_PIPELINE_ID"
+    - echo "Target URL : $DEPLOY_TARGET_URL"   # renders as [MASKED] in logs
+    - echo "Artifact   : $(ls target/*.jar)"
+    - echo ""
+    - echo "In a real deployment, the script would:"
+    - echo "  1. scp target/*.jar deploy-user@staging-server:/opt/app/"
+    - echo "  2. ssh deploy-user@staging-server systemctl restart project3"
+    - echo "  3. curl --fail $DEPLOY_TARGET_URL/actuator/health (smoke test)"
+    - echo ""
+    - echo "Deployment complete."
+
+
+# =============================================================================
+# JOB: notify-deploy (Bonus — Slack/webhook notification)
+# Stage: notify
+#
+# Sends a notification after a successful manual deploy.
+# Uses curl to call a webhook URL stored as a masked variable.
+#
+# Required CI/CD variable (masked):
+#   SLACK_WEBHOOK_URL — your Slack Incoming Webhook URL
+#
+# needs: [deploy-staging] — this job only runs after deploy-staging succeeds.
+# =============================================================================
+notify-deploy:
+  stage: notify
+  image: alpine:latest
+
+  # Install curl (not present in Alpine by default)
+  before_script:
+    - apk add --no-cache curl
+
+  # Only notify after a manual deploy — skip on branches that never deploy.
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - when: never
+
+  needs:
+    - job: deploy-staging   # wait for deploy to succeed before notifying
+
+  script:
+    - |
+      curl -s -X POST "$SLACK_WEBHOOK_URL" \
+        -H "Content-Type: application/json" \
+        -d "{
+          \"text\": \":rocket: *$CI_PROJECT_NAME* deployed to *staging*\",
+          \"attachments\": [{
+            \"color\": \"good\",
+            \"fields\": [
+              {\"title\": \"Commit\",   \"value\": \"$CI_COMMIT_SHORT_SHA\", \"short\": true},
+              {\"title\": \"Pipeline\", \"value\": \"$CI_PIPELINE_ID\",      \"short\": true},
+              {\"title\": \"Branch\",   \"value\": \"$CI_COMMIT_BRANCH\",    \"short\": true},
+              {\"title\": \"Author\",   \"value\": \"$GITLAB_USER_NAME\",    \"short\": true}
+            ]
+          }]
+        }"
+    - echo "Slack notification sent."

@@ -1,0 +1,110 @@
+# Dockerfile-solution
+# Week 8 Thursday — Production-Grade Spring Boot Dockerfile
+# Every instruction is annotated with the best practice it implements.
+
+# ══════════════════════════════════════════════════════
+# STAGE 1: builder
+# Purpose: compile the application and produce the JAR
+# This stage is NOT included in the final image.
+# ══════════════════════════════════════════════════════
+
+# BEST PRACTICE: Pinned tag — never use 'latest'
+# Using a specific tag makes builds reproducible. 'latest' can silently pull
+# a breaking JDK update and break your build weeks later.
+# JDK is required here because Maven needs the compiler (javac).
+FROM eclipse-temurin:17-jdk-alpine AS builder
+
+# BEST PRACTICE: Named build stage
+# 'AS builder' lets the runtime stage reference this stage with COPY --from=builder.
+# Named stages make multi-stage Dockerfiles readable.
+
+# BEST PRACTICE: Set WORKDIR instead of using RUN mkdir + cd
+# WORKDIR creates the directory if it does not exist and sets it as the
+# working directory for all subsequent RUN, COPY, and CMD instructions.
+WORKDIR /build
+
+# BEST PRACTICE: Dependency caching — copy pom.xml BEFORE source code
+# Docker builds images layer by layer. If pom.xml has not changed,
+# Docker reuses the cached layer from the previous build, skipping the
+# slow 'mvn dependency:go-offline' step entirely.
+# Only when pom.xml changes do dependencies re-download.
+COPY pom.xml .
+RUN mvn dependency:go-offline -B
+# -B = batch mode: disables the progress bar, produces cleaner CI logs
+
+# Now copy source code. This layer is invalidated on any source change,
+# but the dependency layer above is still cached.
+COPY src ./src
+
+# Compile and package. -DskipTests because tests run in CI, not in Docker build.
+# -B for batch mode output.
+RUN mvn package -DskipTests -B
+
+# ══════════════════════════════════════════════════════
+# STAGE 2: runtime
+# Purpose: run the application — this IS the final image
+# ══════════════════════════════════════════════════════
+
+# BEST PRACTICE: JRE (not JDK) in the runtime stage
+# The JRE is enough to run a compiled JAR — the JDK is ~300MB larger.
+# Alpine variant keeps the runtime image small (target: under 300MB total).
+FROM eclipse-temurin:17-jre-alpine AS runtime
+
+# BEST PRACTICE: Non-root user
+# Running as root inside a container is a security risk. If the application
+# is compromised, the attacker gets root access to everything the container
+# can reach on the host. A non-root user limits the blast radius.
+# addgroup -S = system group (no shell, no home directory by default)
+# adduser -S  = system user, -G appgroup = assign to group, -u 1001 = fixed UID
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup -u 1001
+
+# BEST PRACTICE: Dedicated WORKDIR for the application
+WORKDIR /app
+
+# BEST PRACTICE: COPY --from=builder (multi-stage) + --chown (correct ownership)
+# --from=builder: copy the JAR from the builder stage, not the host filesystem.
+#   This means the final image contains NO source code, NO Maven cache, NO JDK.
+# --chown=appuser:appgroup: set ownership to the non-root user at copy time.
+#   Without --chown, the file is owned by root and the appuser cannot read it.
+# The wildcard *.jar handles version-stamped filenames like myapp-1.0.0-SNAPSHOT.jar.
+COPY --from=builder --chown=appuser:appgroup /build/target/*.jar app.jar
+
+# BEST PRACTICE: Container-aware JVM tuning via ENV
+# +UseContainerSupport: tells the JVM to respect cgroup memory limits instead of
+#   reading the host's total RAM. Without this flag, a JVM in a 512MB container
+#   may try to allocate heap based on the host's 32GB RAM and get OOM-killed.
+# MaxRAMPercentage=75.0: use up to 75% of the container's memory limit for heap.
+#   Leaves 25% for the JVM's off-heap memory (metaspace, stack, NIO buffers).
+ENV JAVA_OPTS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+
+# BEST PRACTICE: EXPOSE documents the port — it does NOT publish it
+# This is metadata for anyone reading the Dockerfile and for tools like
+# 'docker run -P' (auto-publish all exposed ports). Publishing is done
+# via 'ports:' in docker-compose.yml or '-p' in docker run.
+EXPOSE 8080
+
+# BEST PRACTICE: HEALTHCHECK at the image level
+# Docker uses this to set container health status (starting → healthy/unhealthy).
+# docker-compose.yml can use 'condition: service_healthy' because of this instruction.
+# wget is used instead of curl because curl is not installed on Alpine JRE images.
+HEALTHCHECK --interval=30s --timeout=10s --retries=5 --start-period=60s \
+  CMD wget --quiet --tries=1 --spider http://localhost:8080/actuator/health || exit 1
+
+# BEST PRACTICE: Switch to non-root user BEFORE ENTRYPOINT
+# The USER instruction takes effect for all subsequent RUN, CMD, and ENTRYPOINT.
+# Place it as late as possible — any RUN commands that need root (e.g. adduser)
+# must appear before USER.
+USER appuser
+
+# BEST PRACTICE: ENTRYPOINT in exec form, not shell form
+# Shell form:  ENTRYPOINT java -jar /app/app.jar
+#   Docker wraps this in /bin/sh -c, making /bin/sh PID 1.
+#   SIGTERM from 'docker stop' goes to sh, not to Java — graceful shutdown fails.
+# Exec form:  ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+#   Java IS PID 1. It receives SIGTERM directly and can shut down gracefully.
+# The JAVA_OPTS env variable is expanded by the shell — since exec form has no shell,
+# we use the sh -c trick to expand it:
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]
+# Note: this is an intentional exception to the exec-form rule. The shell is needed
+# ONLY to expand $JAVA_OPTS. Java still receives SIGTERM correctly because sh
+# propagates signals when exec-ing java (it replaces itself with the java process).

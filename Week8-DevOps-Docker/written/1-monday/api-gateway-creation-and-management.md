@@ -1,137 +1,387 @@
-# Step-by-Step Guide: Creating and Managing a REST API in Amazon API Gateway
+# API Gateway — Creation and Management
 
 ## Learning Objectives
-- Design and create a REST API in the AWS Management Console.
-- Configure resources and GET methods to route backend requests.
-- Integrate API Gateway with an application backend running on an EC2 instance.
-- Deploy the configured API definitions to a staging environment.
-- Verify end-to-end connectivity using Postman or curl.
+
+By the end of this lesson, you will be able to:
+
+- Create a REST API in API Gateway using the AWS Console
+- Configure resources (URL paths) and HTTP methods
+- Integrate an API Gateway method with an EC2-hosted Spring Boot backend
+- Deploy an API to a named stage
+- Test the deployed API with Postman
+- Configure throttling and usage quotas to protect your backend
 
 ---
 
 ## Why This Matters
-Exposing a Spring Boot application running on port `8080` directly to public IP addresses is not recommended for production environments. It forces clients to connect directly to the application server and exposes your backend port (`8080`) to the public web.
 
-By placing Amazon API Gateway in front of your EC2 instance, you create a secure abstraction layer. Clients send requests to a clean API Gateway domain name, which forwards the request to the EC2 server behind the scenes. This guide walks you through setting up this architecture step-by-step.
+You have an EC2 instance running a Spring Boot application. How do clients reach it? You could expose the EC2's public IP directly — but that means managing SSL certificates, rate limiting, authentication, monitoring, and CORS yourself. **API Gateway** handles all of that as a managed service, sitting in front of your backend and providing a professional, scalable, secure HTTP endpoint. This is the final piece of the Week 8 deployment puzzle: infrastructure (EC2) → containers (Docker/ECS) → public access (API Gateway).
 
 ---
 
-## The Concept
+## What Is API Gateway?
 
-### 1. The Deployment Architecture
-In this guide, we will build a proxy architecture where public client requests flow through API Gateway to a Spring Boot backend running on an EC2 instance:
+**Amazon API Gateway** is a fully managed service that lets you create, publish, maintain, monitor, and secure APIs at any scale. It acts as the "front door" for your backend services.
 
 ```
-+--------------+                   +---------------------+                   +---------------------+
-| PUBLIC CLIENT|                   |   AMAZON API        |                   |     AWS EC2         |
-|  (Postman/   |==================>|     GATEWAY         |==================>|    INSTANCE         |
-|   Browser)   |  HTTPS Request   |  - Proxy Endpoint   |   HTTP Forward    | - Spring Boot App   |
-|              |                  |  - Auth/Validation  |                   |   Running on 8080   |
-+--------------+                   +---------------------+                   +---------------------+
+Client (Browser / Postman / Mobile App)
+        │
+        │  HTTPS request to API Gateway endpoint
+        ▼
+  ┌─────────────────────────────────┐
+  │        AWS API Gateway          │
+  │  ┌─────────────────────────┐   │
+  │  │  Auth / Throttling /    │   │
+  │  │  CORS / Logging         │   │
+  │  └──────────┬──────────────┘   │
+  └─────────────┼───────────────────┘
+                │  forwards valid requests
+                ▼
+  ┌─────────────────────────────────┐
+  │  EC2 (Spring Boot on port 8080) │
+  └─────────────────────────────────┘
 ```
 
-- **Client Target**: `https://{api-id}.execute-api.{region}.amazonaws.com/prod/tasks`
-- **Internal Forward**: `http://{ec2-public-dns}:8080/tasks`
-
 ---
 
-## Step-by-Step Implementation
+## Step 1 — Create a REST API
 
-### Step 1: Create the REST API Definition
-1. Open the **AWS Management Console** and navigate to **API Gateway**.
-2. Locate the **REST API** card (non-private) and click **Build**.
-3. Under **Create new API**, select **New API**.
-4. Configure the settings:
-   - **API name**: `Project3-Gateway`
-   - **Description**: `Production gateway routing for Project 3 backend`
-   - **Endpoint Type**: **Regional** *(Regional endpoint hosts the API in the current AWS region. Edge-optimized APIs route traffic through CloudFront edge locations, which is ideal for globally distributed users).*
-5. Click **Create API**.
+### Using the AWS Console
 
----
+1. Open **API Gateway Console** → Click **Create API**
+2. Select **REST API** → Click **Build**
+3. Configure:
+   - **Protocol:** REST
+   - **Create new API:** New API
+   - **API name:** `myapp-api`
+   - **Description:** `REST API for myapp Spring Boot backend`
+   - **Endpoint type:** Regional (recommended for single-region deployments)
+4. Click **Create API**
 
-### Step 2: Configure the API Resource and HTTP Method
-1. Select the root path (`/`) in the **Resources** tree.
-2. Click **Actions** (or **Create resource** in the new interface) and choose **Create Resource**.
-3. Set the **Resource Name** to `tasks`. The **Resource Path** will automatically populate as `/tasks`.
-4. Click **Create Resource**.
-5. With the `/tasks` resource highlighted, click **Actions** (or **Create method**) and select **GET**. Click the checkmark to save.
+You now have an empty API with no resources or methods.
 
----
+### Using the AWS CLI
 
-### Step 3: Configure the EC2-Hosted Spring Boot Integration
-Now, we point the GET method to the Spring Boot backend running on our EC2 instance:
+```bash
+# Create the API
+aws apigateway create-rest-api \
+  --name myapp-api \
+  --description "REST API for myapp Spring Boot backend" \
+  --endpoint-configuration types=REGIONAL \
+  --region us-east-1
 
-1. In the method configuration panel, set **Integration Type** to **HTTP**.
-2. Check **Use HTTP Proxy integration**. *(HTTP Proxy integration forwards the entire incoming request body, headers, and query parameters directly to the backend without modification, simplifying configuration).*
-3. Set the **Endpoint URL** to the public DNS or public IP of your EC2 instance, including port 8080.
-   - Example: `http://ec2-54-210-12-3.compute-1.amazonaws.com:8080/tasks`
-4. Click **Save**.
-
-```
-                        Method Execution Panel
- +-------------------+      +-------------------+      +-------------------+
- |   METHOD REQUEST  |===>  |  INTEGRATION REQ. |===>  |   HTTP BACKEND    |
- | - Auth: None      |      | - Type: HTTP Proxy|      |   (EC2 Instance)  |
- | - Query Params    |      | - URL: EC2 Path   |      |   Port 8080       |
- +-------------------+      +-------------------+      +-------------------+
+# The command returns the API ID — save this value
+# Example: "id": "abc123def4"
+API_ID="abc123def4"
 ```
 
-> [!IMPORTANT]
-> For this connection to succeed, the **Security Group** attached to your EC2 instance must have an inbound rule allowing traffic on Port 8080. For production environments, you should restrict this inbound rule to allow traffic only from the IP range of your API Gateway.
+---
+
+## Step 2 — Create a Resource (URL Path)
+
+A **resource** is a URL path in your API (e.g., `/users`, `/products`, `/health`).
+
+### Using the Console
+
+1. In the API editor, click **Actions → Create Resource**
+2. **Resource Name:** `users`
+3. **Resource Path:** `/users`
+4. **Enable API Gateway CORS:** Check this box (prevents CORS errors from browser clients)
+5. Click **Create Resource**
+
+### Using the CLI
+
+```bash
+# Get the root resource ID (the "/" path that exists by default)
+ROOT_RESOURCE_ID=$(aws apigateway get-resources \
+  --rest-api-id $API_ID \
+  --query 'items[?path==`/`].id' \
+  --output text)
+
+# Create the /users resource under root
+aws apigateway create-resource \
+  --rest-api-id $API_ID \
+  --parent-id $ROOT_RESOURCE_ID \
+  --path-part users
+
+# The command returns the new resource ID
+RESOURCE_ID="xyz789abc0"
+```
 
 ---
 
-### Step 4: Deploy the API to a Stage
-Before the API endpoint can accept traffic, you must deploy it:
+## Step 3 — Create a Method
 
-1. Click **Actions** (or **Deploy API**) in the resources panel.
-2. Select **[New Stage]** for the Deployment Stage.
-3. Configure the stage settings:
-   - **Stage name**: `prod`
-   - **Stage description**: `Production release environment`
-4. Click **Deploy**.
-5. The console will display an **Invoke URL** at the top of the screen. This is the root URL of your live API:
-   - `https://abcde12345.execute-api.us-east-1.amazonaws.com/prod`
+A **method** is an HTTP verb (GET, POST, PUT, DELETE) attached to a resource.
+
+### Using the Console
+
+1. Select the `/users` resource in the left panel
+2. Click **Actions → Create Method**
+3. Select **GET** from the dropdown → Click the checkmark
+4. In the method setup dialog:
+   - **Integration type:** HTTP
+   - **Use HTTP Proxy integration:** unchecked (for full control)
+   - **HTTP method:** GET
+   - **Endpoint URL:** `http://<your-ec2-public-ip>:8080/users`
+5. Click **Save**
+
+### Using the CLI
+
+```bash
+# Create the GET method on the /users resource
+aws apigateway put-method \
+  --rest-api-id $API_ID \
+  --resource-id $RESOURCE_ID \
+  --http-method GET \
+  --authorization-type NONE \        # No auth for this demo; use AWS_IAM or Cognito in production
+  --no-api-key-required
+
+# Create the integration — forward GET /users to the Spring Boot backend
+aws apigateway put-integration \
+  --rest-api-id $API_ID \
+  --resource-id $RESOURCE_ID \
+  --http-method GET \
+  --type HTTP \
+  --integration-http-method GET \
+  --uri "http://54.123.45.67:8080/users"   # Your EC2 public IP and Spring Boot port
+```
 
 ---
 
-### Step 5: Verify Connectivity using Postman
+## Step 4 — Configure Method Response and Integration Response
 
-To verify the setup, send a test request through the gateway:
+For a proper REST API, API Gateway needs to know what HTTP status codes to return and how to map them.
 
-1. Open **Postman** (or your local terminal).
-2. Create a new **GET** request.
-3. Construct the request URL by appending the resource path (`/tasks`) to the Invoke URL:
-   - URL: `https://abcde12345.execute-api.us-east-1.amazonaws.com/prod/tasks`
-4. Click **Send**.
-5. **Expected Output**: A `200 OK` status code containing the JSON payload returned by your Spring Boot application (e.g., a list of tasks).
+### Using the Console
+
+After setting up the integration, API Gateway prompts you to configure:
+- **Method Response:** What HTTP codes your API exposes (add 200)
+- **Integration Response:** How to map backend responses to method responses (default mapping works for most cases)
+
+### Using the CLI
+
+```bash
+# Define that the method can return a 200 response
+aws apigateway put-method-response \
+  --rest-api-id $API_ID \
+  --resource-id $RESOURCE_ID \
+  --http-method GET \
+  --status-code 200 \
+  --response-models '{"application/json": "Empty"}'
+
+# Map the backend's response to the 200 method response
+aws apigateway put-integration-response \
+  --rest-api-id $API_ID \
+  --resource-id $RESOURCE_ID \
+  --http-method GET \
+  --status-code 200 \
+  --selection-pattern ""
+```
 
 ---
 
-## Troubleshooting Common Setup Failures
+## Step 5 — Enable CORS
 
-### 1. `504 Gateway Timeout`
-- **Error Description**: API Gateway did not receive a response from your EC2 instance within the 29-second execution limit.
-- **Troubleshooting**: 
-  - Verify that the Spring Boot application is running on the EC2 instance (`ps aux | grep java`).
-  - Verify that the EC2 instance's security group allows inbound traffic on port 8080 from the public web or the API Gateway IP range.
+CORS (Cross-Origin Resource Sharing) is required if your API will be called from a browser (React, Angular, etc.) hosted on a different domain.
 
-### 2. `502 Bad Gateway`
-- **Error Description**: API Gateway connected to the EC2 instance, but the instance returned an invalid response or dropped the connection.
-- **Troubleshooting**: 
-  - Verify that the Endpoint URL configured in your HTTP integration matches the path format expected by Spring Boot (e.g., checking for trailing slashes).
+### Using the Console
+
+1. Select the `/users` resource
+2. Click **Actions → Enable CORS**
+3. Leave the defaults (allows all origins — refine for production)
+4. Click **Enable CORS and replace existing CORS headers**
+
+API Gateway creates an `OPTIONS` method and adds the necessary headers automatically.
+
+### Key CORS Headers API Gateway Adds
+
+```
+Access-Control-Allow-Origin: '*'
+Access-Control-Allow-Methods: 'GET,POST,PUT,DELETE,OPTIONS'
+Access-Control-Allow-Headers: 'Content-Type,Authorization'
+```
+
+---
+
+## Step 6 — Deploy the API to a Stage
+
+Changes to an API are not live until you **deploy** them to a **stage**. A stage is a named snapshot of your API (e.g., `dev`, `staging`, `production`).
+
+### Using the Console
+
+1. Click **Actions → Deploy API**
+2. **Deployment stage:** [New Stage]
+3. **Stage name:** `dev`
+4. **Stage description:** `Development environment`
+5. Click **Deploy**
+
+API Gateway displays your **Invoke URL**:
+```
+https://abc123def4.execute-api.us-east-1.amazonaws.com/dev
+```
+
+Your `/users` endpoint is now accessible at:
+```
+https://abc123def4.execute-api.us-east-1.amazonaws.com/dev/users
+```
+
+### Using the CLI
+
+```bash
+# Deploy the API to a stage named "dev"
+aws apigateway create-deployment \
+  --rest-api-id $API_ID \
+  --stage-name dev \
+  --stage-description "Development environment" \
+  --description "Initial deployment"
+
+# Construct your endpoint URL:
+# https://<api-id>.execute-api.<region>.amazonaws.com/<stage>/<resource>
+echo "API URL: https://$API_ID.execute-api.us-east-1.amazonaws.com/dev/users"
+```
+
+---
+
+## Step 7 — Test with Postman
+
+1. Open **Postman**
+2. Create a new request:
+   - **Method:** GET
+   - **URL:** `https://abc123def4.execute-api.us-east-1.amazonaws.com/dev/users`
+3. Click **Send**
+4. You should see the response from your Spring Boot application
+
+### Troubleshooting Common Issues
+
+| Symptom | Likely Cause | Fix |
+|---|---|---|
+| 502 Bad Gateway | Backend (EC2) is not reachable from API Gateway | Check EC2 security group: allow port 8080 from `0.0.0.0/0` or from API Gateway's IP ranges |
+| 403 Forbidden | Method requires API key or auth | Check authorization type; add API key header if required |
+| CORS error in browser | OPTIONS method missing or headers incorrect | Re-run "Enable CORS" in console |
+| 504 Timeout | Backend is too slow to respond (> 29 second limit) | Optimize the backend; consider async patterns |
+
+---
+
+## Step 8 — Throttling and Quota Settings
+
+API Gateway can protect your backend from being overwhelmed by too many requests.
+
+### Stage-Level Throttling
+
+```bash
+aws apigateway update-stage \
+  --rest-api-id $API_ID \
+  --stage-name dev \
+  --patch-operations \
+    op=replace,path=/defaultRouteSettings/throttlingBurstLimit,value=100 \
+    op=replace,path=/defaultRouteSettings/throttlingRateLimit,value=50
+```
+
+| Setting | Meaning |
+|---|---|
+| **Rate limit** | Maximum steady-state requests per second across all methods |
+| **Burst limit** | Maximum concurrent requests (token bucket capacity) |
+
+### Method-Level Throttling
+
+You can override throttling for specific methods (e.g., stricter limits on expensive operations):
+
+1. **Console:** Stage Editor → select a method → set override throttling
+2. **CLI:**
+
+```bash
+aws apigateway update-stage \
+  --rest-api-id $API_ID \
+  --stage-name dev \
+  --patch-operations \
+    op=replace,path=/~1users/GET/throttling/rateLimit,value=10
+```
+
+### Usage Plans and API Keys
+
+For APIs exposed to external clients, use **usage plans** and **API keys**:
+
+```bash
+# Create a usage plan
+aws apigateway create-usage-plan \
+  --name myapp-usage-plan \
+  --api-stages apiId=$API_ID,stage=dev \
+  --throttle burstLimit=200,rateLimit=100 \
+  --quota limit=10000,period=MONTH
+
+# Create an API key for a client
+aws apigateway create-api-key \
+  --name my-client-key \
+  --enabled
+
+# Associate the key with the usage plan
+aws apigateway create-usage-plan-key \
+  --usage-plan-id <plan-id> \
+  --key-id <key-id> \
+  --key-type API_KEY
+```
+
+Clients then pass the key in the `x-api-key` request header:
+
+```bash
+curl -H "x-api-key: abc123..." https://abc123def4.execute-api.us-east-1.amazonaws.com/dev/users
+```
+
+---
+
+## Managing Multiple Stages
+
+Real-world applications use multiple stages for different environments:
+
+```
+                    ┌──────────────────────────────┐
+                    │         myapp-api             │
+                    └──────────┬───────────────────┘
+                               │
+           ┌───────────────────┼───────────────────┐
+           ▼                   ▼                   ▼
+      Stage: dev          Stage: staging      Stage: prod
+   /dev/users             /staging/users      /prod/users
+   Rate: 50 req/s         Rate: 200 req/s     Rate: 1000 req/s
+   Backend: dev EC2       Backend: stage EC2  Backend: prod ALB
+```
+
+Use stage variables to configure the backend URL per stage without changing code:
+
+1. In the stage, define variable `backendUrl = http://54.123.45.67:8080`
+2. In the integration URI, reference it: `http://${stageVariables.backendUrl}/users`
+
+---
+
+## Updating and Redeploying
+
+After changing resources, methods, or integrations, you must redeploy:
+
+```bash
+# Deploy updated API to the dev stage
+aws apigateway create-deployment \
+  --rest-api-id $API_ID \
+  --stage-name dev \
+  --description "Added POST /users endpoint"
+```
 
 ---
 
 ## Summary
-- **Regional REST APIs** host resources and methods within a specific AWS region, providing control over client routing.
-- **HTTP Proxy Integration** forwards incoming requests to backend web servers (like Spring Boot on EC2) without modification.
-- **API Deployments** compile configuration settings, while **Stages** expose those deployments as live URLs.
-- **Security Groups** must be configured to allow the EC2 instance to accept requests from the API Gateway.
+
+- API Gateway creates a managed HTTPS endpoint in front of your backend.
+- Resources define URL paths; methods define HTTP verbs on those paths.
+- Integrations forward requests from API Gateway to your backend (EC2, Lambda, etc.).
+- Every change must be deployed to a stage before it is live.
+- The Invoke URL format: `https://<api-id>.execute-api.<region>.amazonaws.com/<stage>/<resource>`
+- Enable CORS to allow browser clients from different origins to call your API.
+- Throttling (rate/burst limits) and usage plans protect your backend from traffic spikes.
 
 ---
 
-## Additional Resources
-- [AWS Guide: Set up an HTTP Proxy Integration in API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/setup-http-proxy-integration.html)
-- [AWS Security: Control Access to REST APIs](https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-control-access-to-api.html)
-- [Postman Learning Center: Sending Requests](https://learning.postman.com/docs/sending-requests/requests/)
+## External Resources
+
+- [API Gateway Getting Started — AWS Documentation](https://docs.aws.amazon.com/apigateway/latest/developerguide/getting-started.html)
+- [API Gateway Stage Variables](https://docs.aws.amazon.com/apigateway/latest/developerguide/aws-api-gateway-stage-variables-reference.html)
+- [Throttling Settings in API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-request-throttling.html)

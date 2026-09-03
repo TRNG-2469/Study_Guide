@@ -1,0 +1,103 @@
+# docker-compose-starter.yml
+# Week 8 Thursday — Pair Lab Starter File
+#
+# OWNERSHIP SPLIT:
+#   Partner A owns: the 'app' service block
+#   Partner B owns: the 'db' service block, the volumes: section, and the networks: section
+#   Both partners together write: the 'nginx' service and nginx.conf
+#
+# Fill in every TODO before running 'docker compose up --build'
+
+services:
+
+  # ─────────────────────────────────────────────
+  # SERVICE: app  (PARTNER A DRIVES THIS SECTION)
+  # ─────────────────────────────────────────────
+  app:
+    build: .                          # Build from the Dockerfile in this directory
+    ports:
+      - "8080:8080"                   # Expose Spring Boot on host port 8080
+    environment:
+      # TODO (Partner A): Set the JDBC URL — hostname must be the service name 'db'
+      SPRING_DATASOURCE_URL: ""
+      # TODO (Partner A): Set the username — must match POSTGRES_USER below
+      SPRING_DATASOURCE_USERNAME: ""
+      # TODO (Partner A): Set the password — must match POSTGRES_PASSWORD below
+      SPRING_DATASOURCE_PASSWORD: ""
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+    healthcheck:
+      # TODO (Partner A): Fill in the wget health check command for /actuator/health
+      test: []
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      db:
+        condition: service_healthy    # App will not start until db is healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # SERVICE: db   (PARTNER B DRIVES THIS SECTION)
+  # ─────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine         # Pinned version — never use 'latest'
+    environment:
+      # TODO (Partner B): Name of the database to create on first startup
+      POSTGRES_DB: ""
+      # TODO (Partner B): Username Spring Boot will authenticate with
+      POSTGRES_USER: ""
+      # TODO (Partner B): Password — must match SPRING_DATASOURCE_PASSWORD above
+      POSTGRES_PASSWORD: ""
+    volumes:
+      # TODO (Partner B): Mount the named volume to persist PostgreSQL data files
+      # Format:  - postgres_data:/var/lib/postgresql/data
+      - ""
+    healthcheck:
+      # TODO (Partner B): Use pg_isready to verify the database is accepting connections
+      # The -U flag must match POSTGRES_USER
+      test: []
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # SERVICE: nginx  (BOTH PARTNERS — Phase 3)
+  # ─────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"                       # Expose Nginx on host port 80
+    volumes:
+      # Bind-mount the nginx.conf from this directory — read-only inside the container
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - app                           # Nginx starts after the app container is running
+    networks:
+      - backend
+    restart: unless-stopped
+
+# ─────────────────────────────────────────────────────
+# NAMED VOLUMES  (PARTNER B declares this section)
+# ─────────────────────────────────────────────────────
+volumes:
+  # TODO (Partner B): Declare the named volume used by the db service
+  # Format:
+  # postgres_data:
+  #   driver: local
+  {}  # Remove this placeholder line after adding your volume declaration
+
+# ─────────────────────────────────────────────────────
+# NETWORKS  (PARTNER B declares this section)
+# ─────────────────────────────────────────────────────
+networks:
+  # TODO (Partner B): Declare the backend network used by all three services
+  # Format:
+  # backend:
+  #   driver: bridge
+  {}  # Remove this placeholder line after adding your network declaration

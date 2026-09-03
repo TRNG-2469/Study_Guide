@@ -1,0 +1,192 @@
+| =============================================================================
+|  solution-splunk-queries.spl — Complete Annotated SPL Solutions
+|  Week 8, Friday: Splunk Observability Lab
+|  Reference: do not open until you have attempted each query yourself.
+| =============================================================================
+
+
+| -----------------------------------------------------------------------------
+| SOLUTION 1 — Requests Per Minute
+|
+| What it answers: How many log events arrived each minute over the last hour?
+|
+| Pipeline breakdown:
+|   [1] index=main sourcetype=_json earliest=-1h
+|       Base search — retrieve all events from the main index with our
+|       sourcetype, scoped to the last 60 minutes. earliest=-1h is a
+|       relative time modifier; Splunk resolves it to a Unix timestamp at
+|       search execution time.
+|
+|   [2] | timechart span=1m count as "Requests"
+|       timechart bins events into equal-width time buckets (span=1m = 1 minute
+|       each) and counts how many events fall into each bucket.
+|       The result is a table with _time as the X axis and Requests as Y.
+|       Visualize this as a Line Chart to see traffic patterns over time.
+| -----------------------------------------------------------------------------
+
+index=main sourcetype=_json earliest=-1h
+| timechart span=1m count as "Requests"
+
+
+| -----------------------------------------------------------------------------
+| SOLUTION 2 — Error Rate Percentage
+|
+| What it answers: What percentage of requests in the last hour were errors?
+|
+| Pipeline breakdown:
+|   [1] index=main sourcetype=_json earliest=-1h
+|       Retrieve all events — not just errors — so we have a denominator.
+|
+|   [2] | eval is_error=if(level="ERROR" OR status_code>=500, 1, 0)
+|       Create a binary field: 1 for error events, 0 for healthy events.
+|       OR combines two conditions — catches both logged ERROR level events
+|       and HTTP 5xx responses that might have been logged at WARN level.
+|
+|   [3] | stats sum(is_error) as errors, count as total
+|       Single-pass aggregation:
+|         - sum(is_error) adds up all the 1s to get the error count
+|         - count gives total events (our denominator)
+|
+|   [4] | eval error_pct=round(errors / total * 100, 2)
+|       Compute the percentage. round(..., 2) keeps two decimal places.
+|       Formula: errors / total * 100 = percentage of requests that errored.
+|
+|   [5] | table total, errors, error_pct
+|       Present only the three meaningful columns.
+| -----------------------------------------------------------------------------
+
+index=main sourcetype=_json earliest=-1h
+| eval is_error=if(level="ERROR" OR status_code>=500, 1, 0)
+| stats sum(is_error) as errors, count as total
+| eval error_pct=round(errors / total * 100, 2)
+| table total, errors, error_pct
+
+
+| -----------------------------------------------------------------------------
+| SOLUTION 3 — Response Time Distribution Per Endpoint
+|
+| What it answers: For each endpoint, what are the avg / p50 / p95 / p99 / max
+|                  response times in milliseconds?
+|
+| Pipeline breakdown:
+|   [1] index=main sourcetype=_json duration_ms=* earliest=-1h
+|       duration_ms=* filters to only events where duration_ms is present
+|       (not null/missing). Without this filter, non-request events like
+|       startup banners would pull down the percentile calculations.
+|
+|   [2] | stats avg(duration_ms) as avg_ms,
+|               perc50(duration_ms) as p50_ms,
+|               perc95(duration_ms) as p95_ms,
+|               perc99(duration_ms) as p99_ms,
+|               max(duration_ms) as max_ms
+|         by endpoint
+|       Single stats command computes all five percentiles simultaneously,
+|       grouped by the endpoint field. Each row is one unique endpoint.
+|       perc50 = median. The gap between p95 and p99 reveals tail latency.
+|
+|   [3] | eval avg_ms=round(avg_ms, 2)
+|       Round the average to 2 decimal places for readability.
+|       Percentile functions return integers so they do not need rounding.
+|
+|   [4] | sort -avg_ms
+|       Sort descending by average so the slowest endpoints are at the top.
+|       The minus sign (-) means descending in SPL sort syntax.
+| -----------------------------------------------------------------------------
+
+index=main sourcetype=_json duration_ms=* earliest=-1h
+| stats avg(duration_ms) as avg_ms,
+        perc50(duration_ms) as p50_ms,
+        perc95(duration_ms) as p95_ms,
+        perc99(duration_ms) as p99_ms,
+        max(duration_ms) as max_ms
+  by endpoint
+| eval avg_ms=round(avg_ms, 2)
+| sort -avg_ms
+
+
+| -----------------------------------------------------------------------------
+| SOLUTION 4 — Top Endpoints by Volume
+|
+| What it answers: Which endpoints receive the most traffic?
+|
+| Pipeline breakdown:
+|   [1] index=main sourcetype=_json earliest=-1h
+|       All events — not filtered by error — to see total traffic per path.
+|
+|   [2] | stats count as request_count by endpoint
+|       Count events grouped by the endpoint MDC field.
+|       Each unique URI becomes one row.
+|
+|   [3] | sort -request_count
+|       Sort descending so the busiest endpoint is row 1.
+|
+|   [4] | head 10
+|       Limit to the top 10 results. In a dashboard panel, head 10
+|       ensures the table does not grow unbounded as new endpoints appear.
+| -----------------------------------------------------------------------------
+
+index=main sourcetype=_json earliest=-1h
+| stats count as request_count by endpoint
+| sort -request_count
+| head 10
+
+
+| -----------------------------------------------------------------------------
+| SOLUTION 5 — Alert Threshold Check
+|
+| What it answers: Did more than 10 errors occur in the last 5 minutes?
+|                  (Returns a row only when the answer is yes.)
+|
+| Why this pattern works for Splunk alerts:
+|   Splunk alerts are configured to fire when the search returns N results.
+|   By setting trigger condition to "Number of Results > 0" and writing a
+|   search that returns 0 rows when everything is fine and 1 row when the
+|   threshold is exceeded, the alert becomes self-documenting: a result row
+|   means "something is wrong", no rows means "all clear".
+|
+| Pipeline breakdown:
+|   [1] index=main sourcetype=_json level=ERROR earliest=-5m
+|       Narrow the search to error events in the last 5 minutes only.
+|       Using earliest=-5m instead of -1h keeps the scheduled search fast —
+|       each evaluation window only scans a small slice of data.
+|
+|   [2] | stats count as error_count
+|       Collapse all matching events into a single row with the total count.
+|       If 0 errors occurred, this returns one row with error_count=0.
+|
+|   [3] | where error_count > 10
+|       Filter out the "all clear" row. When error_count is 10 or below,
+|       where removes the row and the search returns 0 results — alert stays
+|       silent. When error_count exceeds 10, the row survives — alert fires.
+|
+| Tuning advice:
+|   - In high-traffic systems replace count with a rate: errors/total*100
+|     and alert when error_pct > 1 (1%) rather than a raw count of 10.
+|   - Adjust earliest=-5m to match your alert schedule interval.
+|   - Add a by endpoint clause if you want per-endpoint alerts.
+| -----------------------------------------------------------------------------
+
+index=main sourcetype=_json level=ERROR earliest=-5m
+| stats count as error_count
+| where error_count > 10
+
+
+| -----------------------------------------------------------------------------
+| BONUS — 5xx Error Search with Endpoint Breakdown (Part 3, Search 3)
+|
+| What it answers: How many 5xx errors did each endpoint generate?
+|
+| Pipeline breakdown:
+|   [1] index=main sourcetype=_json level=ERROR earliest=-1h
+|       Filter to ERROR-level events only.
+|
+|   [2] | stats count as error_count by endpoint
+|       Count errors grouped by endpoint URI.
+|
+|   [3] | sort -error_count
+|       Worst offenders at the top.
+| -----------------------------------------------------------------------------
+
+index=main sourcetype=_json level=ERROR earliest=-1h
+| stats count as error_count by endpoint
+| sort -error_count

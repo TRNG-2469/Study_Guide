@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+=============================================================================
+  logback-spring.xml — Splunk HEC Starter Template
+  Week 8, Friday: Splunk Observability Lab
+=============================================================================
+
+  MAVEN DEPENDENCIES — add both to your pom.xml <dependencies> block:
+
+  <dependency>
+      <groupId>com.splunk.logging</groupId>
+      <artifactId>splunk-library-javalogging</artifactId>
+      <version>1.11.8</version>
+  </dependency>
+  <dependency>
+      <groupId>net.logstash.logback</groupId>
+      <artifactId>logstash-logback-encoder</artifactId>
+      <version>7.4</version>
+  </dependency>
+
+  ENVIRONMENT VARIABLES — set these before starting the app:
+    SPLUNK_HEC_TOKEN  — the token value from Settings > Data Inputs > HEC
+    SPLUNK_HEC_URL    — full URL including port and path, e.g.:
+                        https://myhost.splunkcloud.com:8088/services/collector/event
+=============================================================================
+-->
+
+<configuration>
+
+    <!-- ================================================================
+         PROPERTY DEFINITIONS
+         These pull values from environment variables at startup.
+         If a variable is missing, the app will log to console only
+         and you will see connection errors from HttpEventCollectorAppender.
+         ================================================================ -->
+
+    <!-- TODO: Verify SPLUNK_HEC_TOKEN is exported in your shell or .env file -->
+    <property name="SPLUNK_HEC_TOKEN" value="${SPLUNK_HEC_TOKEN:-MISSING_TOKEN}" />
+
+    <!-- TODO: Verify SPLUNK_HEC_URL is exported in your shell or .env file -->
+    <property name="SPLUNK_HEC_URL" value="${SPLUNK_HEC_URL:-http://localhost:8088/services/collector/event}" />
+
+
+    <!-- ================================================================
+         CONSOLE APPENDER — already complete, no TODOs here
+         Prints human-readable logs to stdout during development.
+         Keep this active alongside the HEC appender so you can see
+         logs without opening Splunk.
+         ================================================================ -->
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <!-- Writes JSON to stdout — useful for parsing with jq locally -->
+        </encoder>
+    </appender>
+
+
+    <!-- ================================================================
+         SPLUNK HEC APPENDER
+         Sends log events as JSON payloads to Splunk over HTTPS.
+         Each log statement becomes one Splunk event.
+         ================================================================ -->
+
+    <appender name="SPLUNK_HEC"
+              class="com.splunk.logging.HttpEventCollectorLogbackAppender">
+
+        <!-- HEC endpoint URL — pulled from SPLUNK_HEC_URL property above -->
+        <url>${SPLUNK_HEC_URL}</url>
+
+        <!-- Authorization token — pulled from SPLUNK_HEC_TOKEN property above -->
+        <token>${SPLUNK_HEC_TOKEN}</token>
+
+        <!-- TODO: Set the Splunk index to receive these events.
+             Use: main
+             (This must match the index you selected when creating the HEC token.) -->
+        <index><!-- TODO: main --></index>
+
+        <!-- TODO: Set the source field — identifies which app sent the event.
+             Use: project3-api
+             (Visible in Splunk as the "source" field on each event.) -->
+        <source><!-- TODO: project3-api --></source>
+
+        <!-- TODO: Set the sourcetype — controls how Splunk parses the payload.
+             Use: _json
+             (Must match the sourcetype you selected in the HEC token wizard.) -->
+        <sourcetype><!-- TODO: _json --></sourcetype>
+
+        <!-- TODO: Set batch_size_count — number of events to buffer before flushing.
+             Use: 10  (low value for dev so you see events quickly)
+             In production you would use 100-1000 to reduce HTTP round-trips. -->
+        <batch_size_count><!-- TODO: 10 --></batch_size_count>
+
+        <!-- Flush interval in milliseconds — flush at least every 5 seconds
+             even if the batch size has not been reached. OK to leave as-is. -->
+        <batch_interval>5000</batch_interval>
+
+        <!-- WARNING: disableCertificateValidation is for local development ONLY.
+             Set to false (or remove this element) for any environment that uses
+             a real certificate — including Splunk Cloud trials.
+             Leaving this true in production exposes you to MITM attacks. -->
+        <disableCertificateValidation>true</disableCertificateValidation>
+
+        <!-- JSON encoder — includes MDC fields as top-level JSON keys.
+             This is what makes endpoint, status_code, duration_ms searchable
+             as separate fields in Splunk rather than buried in a message string. -->
+        <layout class="ch.qos.logback.classic.PatternLayout">
+            <pattern>%msg</pattern>
+        </layout>
+
+        <!-- Send MDC context as extra fields in the JSON payload.
+             The RequestLoggingFilter populates these for every request. -->
+        <middleware class="com.splunk.logging.HttpEventCollectorResendMiddleware">
+            <retryCount>3</retryCount>
+        </middleware>
+
+    </appender>
+
+
+    <!-- ================================================================
+         LOGGER CONFIGURATION
+         ================================================================ -->
+
+    <!-- Your application package — DEBUG level so all service-layer
+         log.debug() calls are captured during development. -->
+    <logger name="com.revature" level="DEBUG" additivity="false">
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="SPLUNK_HEC" />
+    </logger>
+
+    <!-- Spring framework internals — INFO to reduce noise -->
+    <logger name="org.springframework" level="INFO" additivity="false">
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="SPLUNK_HEC" />
+    </logger>
+
+    <!-- Hibernate SQL — set to DEBUG to see generated queries.
+         Change to INFO before demo to avoid flooding Splunk. -->
+    <logger name="org.hibernate.SQL" level="DEBUG" additivity="false">
+        <appender-ref ref="CONSOLE" />
+    </logger>
+
+    <!-- Root logger catches everything not matched above -->
+    <root level="INFO">
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="SPLUNK_HEC" />
+    </root>
+
+</configuration>

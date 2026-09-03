@@ -1,119 +1,214 @@
-# Foundation Models: Core Concepts, Parameters, and Inference
+# Foundation Models
 
 ## Learning Objectives
-- Define what Foundation Models (FMs) are and describe their training process.
-- Contrast base inference, retrieval-augmented generation, and model fine-tuning.
-- Explain the significance of the Context Window in model interactions.
-- Describe the operation of LLM hyper-parameters (temperature, top-p, top-k).
-- Evaluate and select appropriate models for different software workloads.
+
+By the end of this lesson, you will be able to:
+
+- Define what a foundation model is and why the term "foundation" is used
+- Explain the difference between inference and fine-tuning
+- Describe what a context window is and why its size matters
+- Explain temperature and sampling parameters and how they affect output
+- Compare the major model families available in AWS Bedrock
 
 ---
 
 ## Why This Matters
-Integrating AI models into an application involves more than sending a text string to an endpoint. You must understand the parameters that govern the model's behavior.
 
-If your backend sends queries without adjusting hyper-parameters like `temperature` or `top-p`, you risk unpredictable outputs, API timeouts, or high token billing. A clear understanding of context windows, token consumption, and model selection is critical to building cost-effective, reliable AI features.
-
----
-
-## The Concept
-
-### 1. What is a Foundation Model?
-A **Foundation Model (FM)** is a large-scale neural network trained on vast amounts of unstructured data (often using self-supervised learning). They are called "foundation" models because they serve as a base starting point for many downstream tasks:
-
-```
-                  +--------------------------------+
-                  |        FOUNDATION MODEL        |
-                  | (Pre-trained on Web-Scale Data)|
-                  +----------------t---------------+
-                                   |
-           +-----------------------+-----------------------+
-           |                       |                       |
-           v                       v                       v
-+--------------------+   +--------------------+   +--------------------+
-|  Chat & Assistants |   | Sentiment Analysis |   |  Code Generation   |
-+--------------------+   +--------------------+   +--------------------+
-```
-
-These models use transformer architectures to predict the next word or token in a sequence.
+Before you can use AWS Bedrock effectively, you need to understand the thing you are actually calling: the foundation model. Understanding how these models work — even at a conceptual level — helps you write better prompts, choose the right model for the right task, tune parameters for your use case, and debug unexpected outputs. This is the foundational literacy that separates a developer who uses AI tools from one who genuinely engineers with them.
 
 ---
 
-### 2. Adaptation Strategies
+## What Is a Foundation Model?
 
-#### Base Inference
-Querying the pre-trained model directly without making any updates to its weights. Responses rely on the patterns the model learned during its initial training.
+A **foundation model** is a large-scale machine learning model trained on a vast, diverse dataset — typically hundreds of billions of words of text drawn from the internet, books, code repositories, scientific papers, and more. The training process teaches the model statistical patterns in language: which words tend to follow other words, how concepts relate, how arguments are structured, how code behaves.
 
-#### Fine-Tuning
-Updating the internal weights of the model by training it on a specific, labeled dataset. This adapts the model to use specific styles, vocabulary, or niche corporate domains.
+The word "foundation" is deliberate. These models serve as a **base** upon which many different applications can be built, much like how a building's foundation supports many different kinds of structures on top of it. A single foundation model can be used for customer service, legal analysis, code generation, translation, and creative writing — all without any retraining, simply by changing the prompt.
 
-#### Retrieval-Augmented Generation (RAG)
-Instead of retraining the model, you query a database (often a vector database) for relevant documents, paste those documents into the prompt, and ask the model to answer based on that context. This is highly popular because it prevents hallucinations and does not require costly training.
+### Scale Is What Makes Them Different
 
----
+Earlier machine learning models were trained on small, specific datasets to perform one task (classify spam email, detect a face in a photo). Foundation models are trained on general data at a scale that produces **emergent capabilities** — abilities that were not explicitly programmed and were not predictable from smaller models. These include:
 
-### 3. Key Concepts: Context Windows and Tokens
-- **Tokens**: The basic units of text processed by an LLM (typically a word fragment, where 100 tokens roughly equals 75 words).
-- **Context Window**: The maximum number of tokens a model can process in a single request (including both your prompt and the generated response). If your prompt exceeds this limit, the API returns an error or truncates older messages.
-  - E.g., Anthropic Claude 3.5 Sonnet supports a large **200,000 token** context window.
-  - E.g., Llama 3 supports an **8,192 token** context window.
+- Multi-step reasoning ("If A implies B, and B implies C, what does A imply?")
+- In-context learning (adapting behavior based on examples given in the prompt)
+- Code generation from natural language descriptions
+- Translating between languages the model was not explicitly trained on
+
+This generality is what makes foundation models so powerful as a platform for application development.
 
 ---
 
-### 4. Hyper-Parameters (Controlling Output Variability)
+## Inference vs. Fine-Tuning
 
-When calling a foundation model, you pass parameters to configure its output style:
+These two terms describe different ways of using a foundation model.
 
-#### Temperature
-Controls the randomness of the token prediction.
-- **Low Temperature (0.0 to 0.2)**: Output is highly deterministic and consistent. Best for coding, mathematical logic, and factual database queries.
-- **High Temperature (0.7 to 1.0)**: Output is creative and varied. Best for brainstorming, creative writing, and human-like chat dialogue.
+### Inference
 
-#### Top-P (Nucleus Sampling)
-Limits token selection to a cumulative probability percentage. E.g., a Top-P of `0.9` means the model only selects from the pool of words representing the top 90% of logical choices, ignoring highly unlikely words.
+**Inference** is the act of sending a prompt to a trained model and receiving a response. This is what happens every time you call the Bedrock API. The model's internal parameters (its "knowledge," encoded as billions of numerical weights) do not change. You are simply using the model as-is.
 
-#### Top-K
-Limits token selection to the $K$ most likely next words. E.g., a Top-K of `50` limits the model's choices to the top 50 predicted words, preventing it from selecting unusual phrasing.
+Inference is:
+- Instant (responses typically arrive in under a second to a few seconds)
+- Cheap (you pay only for the tokens processed)
+- Flexible (you change the model's behavior entirely by changing your prompt)
+- Stateless (the model has no memory between API calls unless you include prior conversation in your prompt)
+
+**The vast majority of Bedrock applications use only inference.** Prompt engineering — the practice of crafting effective prompts — is a powerful enough tool that most business use cases do not require going further.
+
+### Fine-Tuning
+
+**Fine-tuning** takes a pre-trained foundation model and continues training it on a smaller, task-specific dataset. The model's weights are updated to improve performance on a particular domain or style.
+
+Think of the analogy of hiring a newly graduated lawyer versus a specialist. The new graduate (the foundation model) has broad general knowledge of law. If you want a specialist in maritime law, you could put them through several additional months of specialized training — that is fine-tuning.
+
+Fine-tuning is appropriate when:
+- The domain uses specialized vocabulary or formats the base model handles poorly
+- You need consistent output style (e.g., your brand always writes in a specific voice)
+- You have thousands of high-quality labeled examples
+- Prompt engineering alone cannot achieve acceptable accuracy
+
+Fine-tuning is NOT appropriate when:
+- You simply want to give the model access to new information (use RAG instead)
+- You have fewer than a few hundred training examples
+- You need rapid iteration (fine-tuning jobs take time and cost money)
+
+AWS Bedrock supports fine-tuning for select model families. We will cover the workflow in the next lesson.
 
 ---
 
-## Code Examples and Walkthroughs
+## Context Windows
 
-### 1. Conceptual Hyper-Parameter Payload (JSON Schema)
-This JSON structure demonstrates how hyper-parameters are configured for a model request:
+Every foundation model has a **context window** — the maximum amount of text it can process in a single interaction, measured in tokens.
 
-```json
-{
-  "modelId": "anthropic.claude-3-sonnet-20240229-v1:0",
-  "contentType": "application/json",
-  "accept": "application/json",
-  "body": {
-    "anthropic_version": "bedrock-2023-05-31",
-    "max_tokens": 1000,
-    "temperature": 0.2,
-    "top_p": 0.9,
-    "top_k": 250,
-    "messages": [
-      {
-        "role": "user",
-        "content": "Parse the following customer order logs and output as valid JSON..."
-      }
-    ]
-  }
-}
-```
+Everything inside the context window at the time of a request is "visible" to the model:
+- Your system instructions (e.g., "You are a helpful assistant...")
+- The conversation history (prior turns)
+- Any documents or data you have included
+- The current user message
+
+Anything outside the context window is invisible. The model has no memory of it.
+
+### Token Counting
+
+A **token** is the basic unit of text that models process. Tokens are not exactly words or characters — they are fragments determined by the model's tokenizer. As a rough rule:
+- 1 token ≈ 4 characters of English text
+- 100 tokens ≈ 75 English words
+- 1,000 tokens ≈ 750 words ≈ 1.5 pages of text
+
+### Why Context Window Size Matters
+
+| Context Window Size | What Becomes Possible |
+|---|---|
+| 4,096 tokens (~3,000 words) | Short documents, brief conversations |
+| 16,000 tokens (~12,000 words) | Medium reports, multi-turn conversations |
+| 100,000 tokens (~75,000 words) | Entire codebases, book chapters, lengthy legal contracts |
+| 200,000 tokens (~150,000 words) | Entire books, large document sets |
+
+Claude 3 models in Bedrock support up to 200,000 token context windows, making them suitable for tasks involving very large documents. Amazon Titan Text models have smaller windows, typically 8,000 tokens.
+
+### The Context Window Is Not a Database
+
+A critical misconception: the context window is not permanent storage. Every API call is independent. If you want the model to "remember" a previous conversation, you must include that conversation in the new request's context. This is why chat applications maintain conversation history and re-send it with each message.
+
+---
+
+## Temperature and Sampling Parameters
+
+Foundation models generate text probabilistically. At each step, the model calculates a probability distribution over the entire vocabulary — essentially a ranked list of "what word is most likely to come next given everything so far." Sampling parameters control how the model selects from that distribution.
+
+### Temperature
+
+**Temperature** controls the randomness of the model's output. It is typically a value between 0 and 1 (some models allow higher).
+
+- **Temperature = 0:** The model always picks the highest-probability next token. Output is deterministic and highly consistent. Two calls with identical prompts produce identical responses.
+- **Temperature = 0.5:** Moderate randomness. The model sometimes picks lower-probability tokens, producing more varied responses while still being coherent.
+- **Temperature = 1.0:** High randomness. The model samples more liberally from the probability distribution. Output is creative but can become incoherent or unpredictable.
+
+**Rule of thumb:**
+- Factual retrieval, data extraction, classification → low temperature (0 to 0.2)
+- General question answering, summarization → medium temperature (0.3 to 0.7)
+- Creative writing, brainstorming, marketing copy → higher temperature (0.7 to 1.0)
+
+### Top-P (Nucleus Sampling)
+
+**Top-P** (also called nucleus sampling) is an alternative to temperature that restricts the model to sampling from the smallest set of tokens whose cumulative probability exceeds P.
+
+- **Top-P = 1.0:** No restriction; the model can sample from any token
+- **Top-P = 0.9:** The model samples from the top 90% of probability mass, cutting off rare low-probability words
+- **Top-P = 0.5:** The model is restricted to very high-confidence choices
+
+Top-P and temperature are often used together. AWS Bedrock exposes both parameters for models that support them.
+
+### Top-K
+
+**Top-K** restricts sampling to the K most probable next tokens.
+
+- **Top-K = 1:** Always picks the single most probable token (equivalent to temperature = 0)
+- **Top-K = 50:** Samples from the 50 most probable tokens
+
+### Max Tokens (Max New Tokens)
+
+This parameter limits the length of the model's response. Setting it prevents runaway costs and ensures responses are appropriately concise. If the model reaches the token limit mid-sentence, it stops — so set this value generously enough for the expected response length.
+
+---
+
+## Comparing Model Families in Bedrock
+
+### Side-by-Side Comparison
+
+| Dimension | Claude 3 (Anthropic) | Titan Text (Amazon) | Llama 3 (Meta) | Mistral |
+|---|---|---|---|---|
+| Context window | Up to 200K tokens | Up to 8K tokens | Up to 128K tokens | Up to 32K tokens |
+| Strengths | Reasoning, safety, long documents, nuanced instruction | AWS-native integration, embeddings | Cost efficiency, open weights | Speed, efficiency, European data residency |
+| Best for | Customer-facing chat, complex analysis | RAG pipelines (embeddings), AWS-centric apps | High-volume cost-sensitive use cases | Fast inference, EU compliance needs |
+| Fine-tuning in Bedrock | Yes (select variants) | Yes | Yes (select variants) | Limited |
+| Relative cost | Higher for Opus, competitive for Haiku | Moderate | Lower | Lower |
+
+### When to Choose Claude
+
+Choose Claude when:
+- The task requires nuanced multi-step reasoning
+- Safety and refusal of harmful content is critical (Claude is trained with Constitutional AI)
+- You are processing very long documents (200K context)
+- The quality bar is high and cost is secondary
+
+### When to Choose Titan
+
+Choose Titan when:
+- You need text embeddings for a RAG pipeline (Titan Embeddings is excellent for this)
+- Your architecture is deeply AWS-native and you want minimal cross-vendor complexity
+- You are building on AWS Knowledge Bases (a managed RAG service that uses Titan natively)
+
+### When to Choose Llama
+
+Choose Llama when:
+- Cost is a primary constraint and volume is high
+- You prefer open-weight models for transparency or auditability
+- You want the option to eventually self-host the same model weights
+
+### When to Choose Mistral
+
+Choose Mistral when:
+- Latency is critical (Mistral models are fast)
+- You are in the EU and have data residency preferences
+- Cost efficiency is important and task complexity is moderate
 
 ---
 
 ## Summary
-- **Foundation Models** are large pre-trained neural networks that form the base starting point for downstream tasks.
-- **Inference** queries base models, **Fine-Tuning** updates model weights, and **RAG** injects external context dynamically.
-- **Context Windows** restrict the volume of tokens processed in a single interaction.
-- **Temperature**, **Top-P**, and **Top-K** are configuration parameters that control the creativity and predictability of the model's output.
+
+| Concept | Key Takeaway |
+|---|---|
+| Foundation model | Large-scale pre-trained model usable for many tasks without retraining |
+| Inference | Sending a prompt and receiving a response; model weights unchanged |
+| Fine-tuning | Continued training on domain-specific data; updates model weights |
+| Context window | Maximum text the model can process at once; measured in tokens |
+| Temperature | Controls output randomness; 0 = deterministic, 1 = creative |
+| Top-P / Top-K | Additional sampling constraints for controlling output distribution |
+| Model families | Claude (reasoning/safety), Titan (AWS-native), Llama (open/cost), Mistral (fast/EU) |
 
 ---
 
-## Additional Resources
-- [Understanding Transformers and Attention Mechanisms](https://arxiv.org/abs/1706.03762)
-- [Amazon Bedrock Foundation Model Parameter Directory](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters.html)
-- [Best Practices for Token Management and Context Optimization](https://help.openai.com/en/articles/4936856-what-are-tokens-and-how-to-count-them)
+## External Resources
+
+1. **Hugging Face: What are Foundation Models?** — https://huggingface.co/blog/foundation-models
+2. **Anthropic Claude Model Overview** — https://www.anthropic.com/claude
+3. **AWS Bedrock Supported Foundation Models** — https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html

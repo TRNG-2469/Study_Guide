@@ -1,0 +1,240 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+=============================================================================
+  dashboard-solution.xml — Splunk Simple XML Dashboard Solution
+  Week 8, Friday: Splunk Observability Lab
+  Dashboard title: Project 3 — Application Health
+
+  HOW TO IMPORT THIS DASHBOARD INTO SPLUNK:
+    1. Navigate to Dashboards in the Splunk top nav.
+    2. Click Create New Dashboard -> Classic Dashboard.
+    3. Give it any title, then click Create Dashboard.
+    4. Click the Edit button (top right), then "Source" or "Edit Source".
+    5. Replace all XML in the editor with the content below (starting
+       from the <dashboard> tag, not this comment block).
+    6. Click Apply Changes, then Save.
+
+  XML STRUCTURE OVERVIEW:
+    <dashboard>         — root element, holds global settings
+      <label>           — dashboard title shown in the UI
+      <description>     — subtitle shown on the dashboard card
+      <row>             — horizontal layout container (one per row of panels)
+        <panel>         — individual visualization container
+          <title>       — panel heading
+          <chart>       — line/bar/pie chart visualization
+          <table>       — tabular results visualization
+          <single>      — single-value / KPI visualization
+            <search>    — the SPL query powering this panel
+              <query>   — the SPL text
+              <earliest>— time range start (relative or absolute)
+              <latest>  — time range end (now = current moment)
+            <option>    — visualization settings (key/value pairs)
+=============================================================================
+-->
+
+<dashboard version="1.1" refresh="300">
+  <!--
+    refresh="300" sets auto-refresh to 300 seconds (5 minutes).
+    The dashboard will automatically re-execute all panel searches
+    every 5 minutes without any user action.
+    For a production NOC dashboard you might use refresh="60" (1 minute).
+  -->
+
+  <label>Project 3 — Application Health</label>
+  <description>Real-time monitoring for the Spring Boot API. Auto-refreshes every 5 minutes.</description>
+
+  <!-- =======================================================================
+       ROW 1: Error Rate Over Time (Line Chart)
+       Purpose: Shows the count of ERROR-level log events per minute over
+                the last hour. A sudden spike indicates a problem deployment
+                or an upstream dependency failure.
+       ======================================================================= -->
+  <row>
+    <panel>
+      <title>Error Rate (per minute)</title>
+
+      <!--
+        <chart> renders the SPL results as a visualization.
+        The charting.chart option below sets the chart type to "line".
+        Other valid values: column, bar, pie, scatter, area.
+      -->
+      <chart>
+        <search>
+          <query>
+            index=main sourcetype=_json level=ERROR
+            | timechart span=1m count as "Error Count"
+          </query>
+          <!--
+            earliest=-1h tells Splunk to start the search 1 hour ago.
+            latest=now is implicit but shown here for clarity.
+            These values power the time range picker at the top of the
+            dashboard — changing the picker overrides these defaults.
+          -->
+          <earliest>-1h</earliest>
+          <latest>now</latest>
+        </search>
+
+        <!--
+          Visualization options for the line chart.
+          charting.chart       — chart type
+          charting.legend.placement — where the legend renders
+          charting.axisTitleX.text  — X axis label
+          charting.axisTitleY.text  — Y axis label
+          charting.chart.nullValueMode — how to handle missing minutes
+            "connect" draws a line through gaps (good for sparse data)
+            "gaps"    leaves a break in the line (highlights missing data)
+        -->
+        <option name="charting.chart">line</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="charting.axisTitleX.text">Time</option>
+        <option name="charting.axisTitleY.text">Error Count</option>
+        <option name="charting.chart.nullValueMode">connect</option>
+        <option name="charting.seriesColors">[0xE63946]</option>
+        <!--
+          seriesColors sets the line color to red (#E63946) to make
+          the error rate immediately recognizable as a danger metric.
+          Value is a JSON array of hex color integers.
+        -->
+      </chart>
+    </panel>
+  </row>
+
+  <!-- =======================================================================
+       ROW 2: Top Error Messages (Table) + Avg Response Time (Single Value)
+       Purpose: Two panels side-by-side using a single <row>.
+         Left  — table of the 10 most frequent error messages
+         Right — single KPI showing current average response time in ms
+       ======================================================================= -->
+  <row>
+
+    <!-- Panel 2: Top 10 Error Messages ====================================== -->
+    <panel>
+      <title>Top 10 Error Messages</title>
+
+      <!--
+        <table> renders SPL results as a sortable, paginated table.
+        It is the best choice when the result has multiple rows and
+        columns and the user might want to click column headers to sort.
+      -->
+      <table>
+        <search>
+          <query>
+            index=main sourcetype=_json level=ERROR
+            | stats count by message
+            | sort -count
+            | head 10
+          </query>
+          <!--
+            Pipeline explanation:
+              stats count by message  — count occurrences of each unique
+                                        error message string
+              sort -count             — most frequent message at top
+              head 10                 — limit to 10 rows so the panel
+                                        does not overflow the dashboard
+          -->
+          <earliest>-1h</earliest>
+          <latest>now</latest>
+        </search>
+
+        <!--
+          drilldown="none" disables click-through behavior.
+          Set to "row" to make rows clickable (opens a detail search).
+          Set to "cell" to make individual cells clickable.
+        -->
+        <option name="drilldown">none</option>
+
+        <!--
+          wrap="true" allows long message strings to word-wrap within
+          cells rather than being truncated with an ellipsis.
+        -->
+        <option name="wrap">true</option>
+
+        <!--
+          count=10 sets the default page size for the table.
+          Since head 10 limits the results to 10 rows, pagination
+          will not appear — but this is good practice to set explicitly.
+        -->
+        <option name="count">10</option>
+      </table>
+    </panel>
+
+    <!-- Panel 3: Average Response Time (Single Value KPI) =================== -->
+    <panel>
+      <title>Avg Response Time (ms)</title>
+
+      <!--
+        <single> renders a single prominent number — ideal for KPIs
+        that a NOC engineer needs to read at a glance from across the room.
+        Color thresholds turn the background green/yellow/red based on value.
+      -->
+      <single>
+        <search>
+          <query>
+            index=main sourcetype=_json duration_ms=*
+            | stats avg(duration_ms) as avg_ms
+            | eval avg_ms=round(avg_ms, 2)
+          </query>
+          <!--
+            Pipeline explanation:
+              duration_ms=*        — filter to events that HAVE a duration_ms
+                                     field (excludes non-request log lines)
+              stats avg(duration_ms) as avg_ms
+                                   — compute mean across all events in window
+              eval avg_ms=round(..., 2)
+                                   — round to 2 decimal places for readability
+          -->
+          <earliest>-15m</earliest>
+          <!--
+            Shorter window (-15m) than the other panels.
+            A single-value KPI should reflect the CURRENT state of the system,
+            not a historical average. 15 minutes balances freshness with
+            having enough data points to produce a stable average.
+          -->
+          <latest>now</latest>
+        </search>
+
+        <!--
+          unit="ms" appends the unit label after the number in the UI.
+          The field option tells Splunk which field value to display
+          (must match the field name produced by the SPL).
+        -->
+        <option name="unit">ms</option>
+        <option name="field">avg_ms</option>
+
+        <!--
+          underLabel appears as small text below the main number.
+          Use it to give context about the time window being shown.
+        -->
+        <option name="underLabel">Last 15 minutes</option>
+
+        <!--
+          Color thresholds — define breakpoints for background color:
+            rangeValues    — the boundary values between color bands
+            rangeColors    — colors for each band (including below-first
+                             and above-last), as hex color codes
+          Mapping here:
+            avg_ms < 200   -> #53A051 (green)  — healthy
+            200 <= avg_ms < 500 -> #F8BE34 (yellow) — degraded
+            avg_ms >= 500  -> #E63946 (red)    — critical
+        -->
+        <option name="rangeValues">[200,500]</option>
+        <option name="rangeColors">["#53A051","#F8BE34","#E63946"]</option>
+        <option name="useColors">1</option>
+
+        <!--
+          colorMode="block" fills the entire panel background with the
+          threshold color. Use "value" to color only the number itself.
+        -->
+        <option name="colorMode">block</option>
+
+        <!--
+          numberPrecision="0.00" formats the displayed number to always
+          show two decimal places (e.g., 142.50 instead of 142.5).
+        -->
+        <option name="numberPrecision">0.00</option>
+      </single>
+    </panel>
+
+  </row>
+
+</dashboard>
